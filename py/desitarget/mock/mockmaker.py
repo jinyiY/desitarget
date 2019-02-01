@@ -3624,8 +3624,14 @@ class BGSMaker(SelectTargets):
             for these, issouth in zip( (north, south), (False, True) ):
                 if len(these) > 0:
                     if self.template_maker.add_SNeIa == True:
+                        try:
+                            sne_fluxratiorange=data['sne_fluxratiorange']
+                            sne_filter=data['sne_filter']
+                        except:
+                            sne_fluxratiorange=(0.1, 1.0)
+                            sne_filter='decam2014-r'
                         flux1, _, meta1, objmeta1, snemeta = self.template_maker.make_templates(
-                            input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,
+                            input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,sne_fluxratiorange=sne_fluxratiorange, sne_filter=sne_filter
                             nocolorcuts=True)
                     else:
                         flux1, _, meta1, objmeta1 = self.template_maker.make_templates(
