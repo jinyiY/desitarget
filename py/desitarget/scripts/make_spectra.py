@@ -31,8 +31,10 @@ parser.add_argument('--nside', default=64, type=int,
 parser.add_argument('--healpixel', default=26030, type=int,
                 help='healpixel number')
 
-parser.add_argument('--out_path', default='./simulation_out', type=str,
+parser.add_argument('--path', default='./simulation_out', type=str,
                 help='path to output')
+parser.add_argument('--fname', default='spectra.bin', type=str,
+                help='File name')
 parser.add_argument('--flux_ratio_range', nargs='*', default=(0.01, 1.0), type=float,
                 help='SN flux ratio in r-band')
 
@@ -83,7 +85,8 @@ def main():
     # Parse arguments
     args = parser.parse_args()
     nmodel = args.nall
-    path = args.out_path
+    path = args.outpath
+    fname = args.fname
     add_SNeIa = args.add_sn_ia
     add_SNeIIp = args.add_sn_iip
     flux_ratio = args.flux_ratio_range
@@ -123,7 +126,7 @@ def main():
         tflux, twave, ttargets, ttruth, tobjtruth = mockmaker(Maker,template_maker, seed=seed, nrand=nrand,sne_fluxratiorange=flux_ratio_range
             ,sne_filter='decam2014-r',healpixel=healpixel,nside=nside)
         templates_bgs = [tflux, twave, ttargets, ttruth, tobjtruth]
-        saved_to = save(templates_bgs,os.path.join(path,'templates_bgs.bin'))
+        saved_to = save(templates_bgs,os.path.join(path, fname))
         print("Saved BGS template data to {}".format(saved_to))
     if nelg != 0:
         nrand = nelg     
@@ -133,7 +136,7 @@ def main():
         tflux, twave, ttargets, ttruth, tobjtruth = mockmaker(Maker,template_maker, seed=seed, nrand=nrand,sne_fluxratiorange=flux_ratio_range
             ,sne_filter='decam2014-r',healpixel=healpixel,nside=nside)
         templates_bgs = [tflux, twave, ttargets, ttruth, tobjtruth]
-        saved_to = save(templates_bgs,os.path.join(path,'templates_elg.bin'))
+        saved_to = save(templates_bgs,os.path.join(path,fname))
         print("Saved ELG template data to {}".format(saved_to))
     if nlrg != 0:
         nrand = nlrg       
@@ -143,7 +146,7 @@ def main():
         tflux, twave, ttargets, ttruth, tobjtruth = mockmaker(Maker,template_maker, seed=seed, nrand=nrand,sne_fluxratiorange=flux_ratio_range
             ,sne_filter='decam2014-r',healpixel=healpixel,nside=nside)
         templates_bgs = [tflux, twave, ttargets, ttruth, tobjtruth]
-        saved_to = save(templates_bgs,os.path.join(path,'templates_lrg.bin'))
+        saved_to = save(templates_bgs,os.path.join(path,fname))
         print("Saved LRG template data to {}".format(saved_to))
     # data = np.concatenate([t[0] for t in
     #                      [templates_bgs, templates_elg, templates_lrg] if len(t) != 0])
