@@ -3631,7 +3631,7 @@ class BGSMaker(SelectTargets):
                             sne_fluxratiorange=(0.1, 1.0)
                             sne_filter='decam2014-r'
                         flux1, _, meta1, objmeta1, snemeta = self.template_maker.make_templates(
-                            input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,sne_fluxratiorange=sne_fluxratiorange, sne_filter=sne_filter
+                            input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,sne_fluxratiorange=sne_fluxratiorange, sne_filter=sne_filter,
                             nocolorcuts=True)
                     else:
                         flux1, _, meta1, objmeta1 = self.template_maker.make_templates(
