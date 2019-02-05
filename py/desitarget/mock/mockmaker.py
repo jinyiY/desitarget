@@ -150,9 +150,9 @@ def empty_targets_table(nobj=1):
     targets.add_column(Column(name='BGS_TARGET', length=nobj, dtype='i8'))
     targets.add_column(Column(name='MWS_TARGET', length=nobj, dtype='i8'))
 
-    targets.add_column(Column(name='PRIORITY', length=nobj, dtype='i8'))
+    targets.add_column(Column(name='PRIORITY_INIT', length=nobj, dtype='i8'))
     targets.add_column(Column(name='SUBPRIORITY', length=nobj, dtype='f8'))
-    targets.add_column(Column(name='NUMOBS', length=nobj, dtype='i8'))
+    targets.add_column(Column(name='NUMOBS_INIT', length=nobj, dtype='i8'))
     targets.add_column(Column(name='HPXPIXEL', length=nobj, dtype='i8'))
 
     return targets
@@ -180,7 +180,6 @@ def empty_truth_table(nobj=1, templatetype='', use_simqso=True):
     truth = Table()
     truth.add_column(Column(name='TARGETID', length=nobj, dtype='int64'))
     truth.add_column(Column(name='MOCKID', length=nobj, dtype='int64'))
-    truth.add_column(Column(name='CONTAM_TARGET', length=nobj, dtype='i8'))
 
     truth.add_column(Column(name='TRUEZ', length=nobj, dtype='f4', data=np.zeros(nobj)))
     truth.add_column(Column(name='TRUESPECTYPE', length=nobj, dtype='U10')) # GALAXY, QSO, STAR, etc.
@@ -253,12 +252,10 @@ class SelectTargets(object):
         from desiutil.brick import Bricks
         from specsim.fastfiberacceptance import FastFiberAcceptance
         from ..targetmask import desi_mask, bgs_mask, mws_mask
-        from ..contammask import contam_mask
         
         self.desi_mask = desi_mask
         self.bgs_mask = bgs_mask
         self.mws_mask = mws_mask
-        self.contam_mask = contam_mask
 
         self.Bricks = Bricks(bricksize=bricksize)
         self.SFDMap = SFDMap()
@@ -287,9 +284,6 @@ class SelectTargets(object):
         data : :class:`dict`
             Input dictionary of sources with RA, Dec coordinates, modified on output
             to contain reddening and the MW transmission in various bands.
-        params : :class:`dict`
-            Dictionary summary of the input configuration file, restricted to a
-            particular source_name (e.g., 'QSO').
 
         Raises
         ------
@@ -300,6 +294,22 @@ class SelectTargets(object):
 
         for band in ('G', 'R', 'Z', 'W1', 'W2'):
             data['MW_TRANSMISSION_{}'.format(band)] = 10**(-0.4 * extcoeff[band] * data['EBV'])
+
+    def mw_dust_extinction(self, Rv=3.1):
+        """Cache the spectroscopic Galactic extinction curve for later use.
+
+        Parameters
+        ----------
+        Rv : :class:`float`
+            Total-to-selective extinction factor.  Defaults to 3.1.
+
+        Raises
+        ------
+
+        """
+        from desiutil.dust import ext_odonnell
+        extinction = Rv * ext_odonnell(self.wave, Rv=Rv)
+        return extinction
 
     def imaging_depth(self, data):
         """Add the imaging depth to the data dictionary.
@@ -353,7 +363,7 @@ class SelectTargets(object):
             wisedepth_ivar = 1 / (5 * 10**(-0.4 * (wisedepth_mag - 22.5)))**2 # 5-sigma, 1/nanomaggies**2
             data['PSFDEPTH_{}'.format(band)] = wisedepth_ivar
 
-    def scatter_photometry(self, data, truth, targets, indx=None, psf=True,
+    def scatter_photometry(self, data, truth, targets, indx=None, 
                            seed=None, qaplot=False):
         """Add noise to the input (noiseless) photometry based on the depth (as well as
         the inverse variance fluxes in GRZW1W2).
@@ -371,9 +381,6 @@ class SelectTargets(object):
         indx : :class:`numpy.ndarray`, optional
             Scatter the photometry of a subset of the objects in the data
             dictionary, as specified using their zero-indexed indices.
-        psf : :class:`bool`, optional
-            For point sources (e.g., QSO, STAR) use the PSFDEPTH values,
-            otherwise use GALDEPTH.  Defaults to True.
         seed : :class:`int`, optional
             Seed for reproducibility and random number generation.
         qaplot : :class:`bool`, optional
@@ -388,23 +395,26 @@ class SelectTargets(object):
             indx = np.arange(len(data['RA']))
         nobj = len(indx)
 
-        if psf:
-            depthprefix = 'PSF'
-        else:
-            depthprefix = 'GAL'
+        if 'TYPE' in data.keys():
+            for band in ('G', 'R', 'Z'):
+                fluxkey = 'FLUX_{}'.format(band)
+                ivarkey = 'FLUX_IVAR_{}'.format(band)
 
-        factor = 5 # -- should this be 1 or 5???
+                for depthprefix in ('PSF', 'GAL'):
+                    if depthprefix == 'PSF':
+                        these = np.where( data['TYPE'][indx] == 'PSF' )[0] # point sources
+                    else:
+                        these = np.where( data['TYPE'][indx] != 'PSF' )[0] # galaxies
 
-        for band in ('G', 'R', 'Z'):
-            fluxkey = 'FLUX_{}'.format(band)
-            ivarkey = 'FLUX_IVAR_{}'.format(band)
-            depthkey = '{}DEPTH_{}'.format(depthprefix, band)
+                    if len(these) > 0:
+                        depthkey = '{}DEPTH_{}'.format(depthprefix, band)
 
-            sigma = 1 / np.sqrt(data[depthkey][indx]) / 5 # nanomaggies, 1-sigma
-            targets[fluxkey][:] = truth[fluxkey] + rand.normal(scale=sigma)
+                        sigma = 1 / np.sqrt(data[depthkey][indx][these]) / 5 # nanomaggies, 1-sigma
+                        targets[fluxkey][these] = truth[fluxkey][these] + rand.normal(scale=sigma)
 
-            targets[ivarkey][:] = 1 / sigma**2
+                        targets[ivarkey][these] = 1 / sigma**2
 
+        # WISE sources are all point sources
         for band in ('W1', 'W2'):
             fluxkey = 'FLUX_{}'.format(band)
             ivarkey = 'FLUX_IVAR_{}'.format(band)
@@ -502,7 +512,7 @@ class SelectTargets(object):
 
             setattr(SelectTargets, 'GMM_{}'.format(target.upper()), (morph, fractype, gmmcols, GMM))
 
-    def sample_GMM(self, nobj, isouth=None, target=None, seed=None,
+    def sample_GMM(self, nobj, isouth=None, target=None, seed=None, morph=None,
                    prior_mag=None, prior_redshift=None):
         """Sample from the GMMs read by self.read_GMM.
 
@@ -527,8 +537,10 @@ class SelectTargets(object):
             colorcuts_function = cuts.isQSO_colors
         else:
             colorcuts_function = None
-            
-        morph = GMM[0]
+
+        # Allow an input morphological type, e.g., to simulate contaminants.
+        if morph is None:
+            morph = GMM[0]
         if isouth is None:
             isouth = np.ones(nobj).astype(bool)
 
@@ -542,10 +554,10 @@ class SelectTargets(object):
 
         # Get the total number of each morphological type, accounting for
         # rounding.
-        frac2d_magbins = np.vstack( [GMM[1][mm].data for mm in morph] )
+        frac2d_magbins = np.vstack( [GMM[1][mm].data for mm in np.atleast_1d(morph)] )
         norm = np.sum(frac2d_magbins, axis=1)
         frac1d_morph = norm / np.sum(norm)
-        nobj_morph = np.round(frac1d_morph*nobj).astype(int)
+        nobj_morph = np.round(frac1d_morph * nobj).astype(int)
         dn = np.sum(nobj_morph) - nobj
         if dn > 0:
             nobj_morph[np.argmax(nobj_morph)] -= dn
@@ -556,9 +568,11 @@ class SelectTargets(object):
         # simplicity we ignore the north-south split here.
         gmmout = {'MAGFILTER': np.zeros(nobj).astype('U15'), 'TYPE': np.zeros(nobj).astype('U4')}
         for key in ('MAG', 'FRACDEV', 'FRACDEV_IVAR',
-                    'SHAPEDEV_R', 'SHAPEDEV_R_IVAR', 'SHAPEDEV_E1', 'SHAPEDEV_E1_IVAR', 'SHAPEDEV_E2', 'SHAPEDEV_E2_IVAR',
-                    'SHAPEEXP_R', 'SHAPEEXP_R_IVAR', 'SHAPEEXP_E1', 'SHAPEEXP_E1_IVAR', 'SHAPEEXP_E2', 'SHAPEEXP_E2_IVAR',
-                    'GR', 'RZ', 'ZW1'):
+                    'SHAPEDEV_R', 'SHAPEDEV_R_IVAR', 'SHAPEDEV_E1', 'SHAPEDEV_E1_IVAR',
+                    'SHAPEDEV_E2', 'SHAPEDEV_E2_IVAR',
+                    'SHAPEEXP_R', 'SHAPEEXP_R_IVAR', 'SHAPEEXP_E1', 'SHAPEEXP_E1_IVAR',
+                    'SHAPEEXP_E2', 'SHAPEEXP_E2_IVAR',
+                    'GR', 'RZ', 'ZW1', 'W1W2'):
             gmmout[key] = np.zeros(nobj).astype('f4')
 
         def _samp_iterate(samp, target='', south=True, rand=None, maxiter=5,
@@ -608,10 +622,10 @@ class SelectTargets(object):
                 if nneed == 0 or itercount == maxiter:
                     makemore = False
                 itercount += 1
-                    
+
             return samp
         
-        for ii, mm in enumerate(morph):
+        for ii, mm in enumerate(np.atleast_1d(morph)):
             if nobj_morph[ii] > 0:
                 # Should really be using north/south GMMs.
                 cols = GMM[2][ii]
@@ -625,29 +639,14 @@ class SelectTargets(object):
                     samp[south] = _samp_iterate(samp[south], target=target, south=True, rand=rand,
                                                 colorcuts_function=colorcuts_function)
                     
-                # No iterating
-                #_samp = GMM[3][ii].sample(nobj, rand=rand)
-                #for jj, tt in enumerate(cols):
-                #    samp[tt] = _samp[:, jj]
-
-                ## Check:
-                #from desitarget.cuts import isLRG_colors
-                #zmag = samp['z']
-                #rmag = samp['rz'] + zmag
-                #gmag = samp['gr'] + rmag
-                #w1mag = zmag - samp['zw1']
-                #gflux, rflux, zflux, w1flux = [1e9 * 10**(-0.4*mg) for mg in (gmag, rmag, zmag, w1mag)]
-                #itarg = np.zeros(nobj).astype(bool)
-                #itarg_s = isLRG_colors(gflux=gflux[south], rflux=rflux[south], zflux=zflux[south], w1flux=w1flux[south], south=True)
-                #itarg_n = isLRG_colors(gflux=gflux[north], rflux=rflux[north], zflux=zflux[north], w1flux=w1flux[north], south=False)
-                #itarg[np.where(itarg_n)[0]] = True
-                #itarg[np.where(itarg_s)[0]] = True
-
                 # Choose samples with the appropriate magnitude-dependent
                 # probability, for this morphological type.
                 prob = np.interp(samp[cols[0]], magbins, frac2d_magbins[ii, :])
                 prob /= np.sum(prob)
-                these = rand.choice(nobj, size=nobj_morph[ii], p=prob, replace=False)
+                if np.count_nonzero(prob) < nobj_morph[ii]:
+                    these = rand.choice(nobj, size=nobj_morph[ii], replace=False)
+                else:
+                    these = rand.choice(nobj, size=nobj_morph[ii], p=prob, replace=False)
 
                 gthese = np.arange(nobj_morph[ii]) + np.sum(nobj_morph[:ii])
 
@@ -657,6 +656,8 @@ class SelectTargets(object):
                     gmmout['MAG'][gthese] = samp['r'][these]
                 if 'zw1' in samp.dtype.names:
                     gmmout['ZW1'][gthese] = samp['zw1'][these]
+                if 'w1w2' in samp.dtype.names:
+                    gmmout['W1W2'][gthese] = samp['w1w2'][these]
                 
                 gmmout['GR'][gthese] = samp['gr'][these]
                 gmmout['RZ'][gthese] = samp['rz'][these]
@@ -785,73 +786,64 @@ class SelectTargets(object):
         else:
             return indx.astype('i4')
         
-    def sample_gmm_nospectra(self, meta, rand=None):
-        """Sample from one of the Gaussian mixture models generated by
-        desitarget/doc/nb/gmm-quicksurvey.ipynb.
+    def _nospectra_photometry(self, meta, rand, data, indx, target_name, contaminants=False):
+        """Populate the photometry in meta in no-spectra mode."""
 
-        Note: Any changes to the quantities fitted in that notebook need to be
-        updated here!
+        nobj = len(indx)
+
+        def _g_and_z(rmag, gr, rz):
+            zmag = rmag - rz
+            gmag = gr + rmag
+            return gmag, zmag
         
-        """
-        if rand is None:
-            rand = np.random.RandomState()
+        def _r_and_z(gmag, gr, rz):
+            rmag = gmag - gr
+            zmag = rmag - rz
+            return rmag, zmag
 
-        nsample = len(meta)
-        target = meta['OBJTYPE'][0].upper()
+        def _g_and_r(zmag, gr, rz):
+            rmag = rz + zmag
+            gmag = gr + rmag
+            return gmag, rmag
+
+        gr, rz = data['GR'][indx], data['RZ'][indx]
+
+        #if target_name == 'QSO':
+        #    if contaminants:
+        #        gmag = normmag = data['GMAG'][indx]
+        #        magfilter = data['MAGFILTER-G'][indx]
+        #    else:
+        #        gmag = normmag = data['MAG'][indx]
+        #        magfilter = data['MAGFILTER'][indx]
+        #    rmag, zmag = _r_and_z(gmag, gr, rz)
+            
+        if target_name == 'LRG':
+            if contaminants:
+                zmag = normmag = data['ZMAG'][indx]
+                magfilter = data['MAGFILTER-Z'][indx]
+            else:
+                zmag = normmag = data['MAG'][indx]
+                magfilter = data['MAGFILTER'][indx]
+            gmag, rmag = _g_and_r(zmag, gr, rz)
+        else:
+            rmag = normmag = data['MAG'][indx]
+            magfilter = data['MAGFILTER'][indx]
+            gmag, zmag = _g_and_z(rmag, gr, rz)
+
+        W1mag = zmag - data['ZW1'][indx]
+        W2mag = W1mag - data['W1W2'][indx]
         
-        data = self.GMM_nospectra.sample(nsample, random_state=rand)
+        meta['SEED'][:] = rand.randint(2**31, size=nobj)
+        meta['REDSHIFT'][:] = data['Z'][indx]
 
-        alltags = dict()
-        alltags['ELG'] = ('r', 'g - r', 'r - z', 'z - W1', 'W1 - W2', 'oii')
-        alltags['LRG'] = ('z', 'g - r', 'r - z', 'z - W1', 'W1 - W2')
-        alltags['BGS'] = ('r', 'g - r', 'r - z', 'z - W1', 'W1 - W2')
-        alltags['QSO'] = ('g', 'g - r', 'r - z', 'z - W1', 'W1 - W2')
-        alltags['LYA'] = ('g', 'g - r', 'r - z', 'z - W1', 'W1 - W2')
-
-        tags = alltags[target]
-        sample = np.empty( nsample, dtype=np.dtype( [(tt, 'f4') for tt in tags] ) )
-        for ii, tt in enumerate(tags):
-            sample[tt] = data[:, ii]
-
-        if target == 'ELG' or target == 'BGS':
-            rmag = sample['r']
-            zmag = rmag - sample['r - z']
-            gmag = sample['g - r'] + rmag
-            normmag = rmag
-        elif target == 'LRG':
-            zmag = sample['z']
-            rmag = sample['r - z'] + zmag
-            gmag = sample['g - r'] + rmag
-            normmag = zmag
-        elif target == 'QSO' or target == 'LYA':
-            gmag = sample['g']
-            rmag = gmag - sample['g - r']
-            zmag = rmag - sample['r - z']
-            normmag = gmag
-
-        W1mag = zmag - sample['z - W1'] 
-        W2mag = W1mag - sample['W1 - W2'] 
-        
         meta['MAG'][:] = normmag
+        meta['MAGFILTER'][:] = magfilter
         meta['FLUX_G'][:] = 1e9 * 10**(-0.4 * gmag)
         meta['FLUX_R'][:] = 1e9 * 10**(-0.4 * rmag)
         meta['FLUX_Z'][:] = 1e9 * 10**(-0.4 * zmag)
         meta['FLUX_W1'][:] = 1e9 * 10**(-0.4 * W1mag)
         meta['FLUX_W2'][:] = 1e9 * 10**(-0.4 * W2mag)
-
-        return meta
-
-    def deredden(self, targets):
-        """Correct photometry for Galactic extinction."""
-
-        unredflux = list()
-        for band in ('G', 'R', 'Z', 'W1', 'W2'):
-            unredflux.append(targets['FLUX_{}'.format(band)] /
-                             targets['MW_TRANSMISSION_{}'.format(band)])
-        gflux, rflux, zflux, w1flux, w2flux = unredflux
-
-        return gflux, rflux, zflux, w1flux, w2flux
-
+        
     def get_fiberfraction(self, targets, south=True, ref_seeing=1.0, ref_lambda=5500.0):
         """Estimate the fraction of the integrated flux that enters the fiber.
 
@@ -925,9 +917,9 @@ class SelectTargets(object):
 
         return fiberfraction_g, fiberfraction_r, fiberfraction_z
 
-    def populate_targets_truth(self, data, meta, objmeta, indx=None, seed=None, psf=True,
-                               use_simqso=True, truespectype='', templatetype='',
-                               templatesubtype=''):
+    def populate_targets_truth(self, flux, data, meta, objmeta, indx=None,
+                               seed=None, use_simqso=True, truespectype='',
+                               templatetype='', templatesubtype=''):
         """Initialize and populate the targets and truth tables given a dictionary of
         source properties and a spectral metadata table.  
 
@@ -942,9 +934,6 @@ class SelectTargets(object):
             dictionary, as specified using their zero-indexed indices.
         seed : :class:`int`, optional
             Seed for reproducibility and random number generation.
-        psf : :class:`bool`, optional
-            For point sources (e.g., QSO, STAR) use the PSFDEPTH values,
-            otherwise use GALDEPTH.  Defaults to True.
         use_simqso : :class:`bool`, optional
             Initialize a SIMQSO-style objtruth table. Defaults to True.
         truespectype : :class:`str` or :class:`numpy.array`, optional
@@ -980,6 +969,8 @@ class SelectTargets(object):
         if len(objtruth) > 0:
             if 'Z_NORSD' in data.keys() and 'TRUEZ_NORSD' in objtruth.colnames:
                 objtruth['TRUEZ_NORSD'][:] = data['Z_NORSD'][indx]
+            if 'OIIFLUX' in data.keys() and 'OIIFLUX' in objtruth.colnames: # ELGs
+                objtruth['OIIFLUX'][:] = data['OIIFLUX'][indx]
 
         # Copy all information from DATA to TARGETS.
         for key in data.keys():
@@ -1037,11 +1028,15 @@ class SelectTargets(object):
             
         # Scatter the observed photometry based on the depth and then attenuate
         # for Galactic extinction.
-        self.scatter_photometry(data, truth, targets, indx=indx, psf=psf, seed=seed)
+        self.scatter_photometry(data, truth, targets, indx=indx, seed=seed)
 
         for band, key in zip( ('G', 'R', 'Z', 'W1', 'W2'),
                               ('FLUX_G', 'FLUX_R', 'FLUX_Z', 'FLUX_W1', 'FLUX_W2') ):
             targets[key][:] = targets[key] * data['MW_TRANSMISSION_{}'.format(band)][indx]
+
+        # Attenuate the spectra for extinction, too.
+        if len(flux) > 0 and 'EBV' in data.keys():
+            flux *= 10**( -0.4 * data['EBV'][indx, np.newaxis] * self.extinction )
 
         # Finally compute the (simulated, observed) flux within the fiber.
         for these, issouth in zip( (north, south), (False, True) ):
@@ -1055,7 +1050,7 @@ class SelectTargets(object):
 
         return targets, truth, objtruth
 
-    def mock_density(self, mockfile=None, nside=64, density_per_pixel=False):
+    def mock_density(self, mockfile=None, nside=64, density_per_pixel=False, zmax_qso=None):
         """Compute the median density of targets in the full mock. 
 
         Parameters
@@ -1067,6 +1062,9 @@ class SelectTargets(object):
         density_per_pixel : :class:`bool`, optional
             Return the density per healpixel rather than just the median
             density, which may be useful for statistical purposes.
+        zmax_qso : :class:`float`
+            Maximum redshift of tracer QSOs to read, to ensure no
+            double-counting with Lya mocks.  Defaults to None.
 
         Returns
         -------
@@ -1092,7 +1090,15 @@ class SelectTargets(object):
         
         areaperpix = hp.nside2pixarea(nside, degrees=True)
 
-        radec = fitsio.read(mockfile, columns=['RA', 'DEC'], upper=True, ext=1)
+        if zmax_qso is not None:
+            radec = fitsio.read(mockfile, columns=['RA', 'DEC', 'Z_COSMO', 'DZ_RSD'],
+                                upper=True, ext=1)
+            zz = (radec['Z_COSMO'].astype('f8') + radec['DZ_RSD'].astype('f8')).astype('f4')
+            cut = np.where( zz < zmax_qso )[0]
+            radec = radec[cut]
+        else:
+            radec = fitsio.read(mockfile, columns=['RA', 'DEC'], upper=True, ext=1)
+
         healpix = footprint.radec2pix(nside, radec['RA'], radec['DEC'])
 
         # Get the weight per pixel, protecting against divide-by-zero.
@@ -1103,7 +1109,7 @@ class SelectTargets(object):
 
         mock_density = np.bincount(healpix, weights=weight) / areaperpix # [targets/deg]
         mock_density = mock_density[np.flatnonzero(mock_density)]
-
+        
         if density_per_pixel:
             return mock_density
         else:
@@ -1162,6 +1168,35 @@ class SelectTargets(object):
 
         """
         return dec <= 32.125
+
+    def remove_north_south_bits(self, desi_target, bgs_target, mws_target):
+        """Remove all the "north" and "south" targeting bits.  See the discussion here
+        for details: https://github.com/desihub/desitarget/pull/426
+
+        Parameters
+        ----------
+        desi_target : :class:`int64`
+            Dark-time targeting bit from targetmask.yaml.
+        bgs_target : :class:`int64`
+            BGS targeting bit from targetmask.yaml.
+        mws_target : :class:`int64`
+            MWS targeting bit from targetmask.yaml.
+
+        """
+        for category, target, mask in zip( ('MWS', 'BGS', 'DESI'),
+                                           (mws_target, bgs_target, desi_target), 
+                                           (self.mws_mask, self.bgs_mask, self.desi_mask) ):
+            for bitname in mask.names():
+                if 'SOUTH' in bitname or 'NORTH' in bitname:
+                    these = target & mask.mask(bitname) != 0
+                    if np.sum(these) > 0:
+                        target[these] -= mask.mask(bitname) # subtract that bit
+                        # For MWS and BGS, if we subtracted out the last bit
+                        # then we also have to unset MWS_ANY and BGS_ANY, respectively.
+                        if category == 'MWS' or category == 'BGS':
+                            andthose = target[these] == 0
+                            if np.sum(andthose) > 0:
+                                desi_target[these][andthose] -= self.desi_mask.mask('{}_ANY'.format(category))
 
 class ReadGaussianField(SelectTargets):
     """Read a Gaussian random field style mock catalog."""
@@ -1246,7 +1281,7 @@ class ReadGaussianField(SelectTargets):
                 ra, dec, allpix, pixweight = _get_radec(mockfile, nside, self.pixmap)
                 ReadGaussianField.cached_radec = (mockfile, nside, ra, dec, allpix, pixweight)
             else:
-                log.info('Using cached coordinates, healpixels, and pixel weights from {}'.format(mockfile))
+                log.debug('Using cached coordinates, healpixels, and pixel weights from {}'.format(mockfile))
                 _, _, ra, dec, allpix, pixweight = ReadGaussianField.cached_radec
 
         mockid = np.arange(len(ra)) # unique ID/row number
@@ -1307,6 +1342,74 @@ class ReadGaussianField(SelectTargets):
         gmmout = self.sample_GMM(nobj, target=target_name, isouth=isouth,
                                  seed=seed, prior_redshift=zz)
 
+        # For ELGs, also sample to get the [OII] flux for use with --no-spectra.
+        # Note that these are the "true" values (before photometric scatter and
+        # Galactic extinction).
+
+        # Here's the code used to determine these correlations--
+        # import fitsio ; import numpy as np ; import matplotlib.pyplot as plt ; from desisim.util import medxbin
+        # ff = fitsio.FITS('/global/projecta/projectdirs/desi/datachallenge/reference_runs/18.11/targets/truth.fits')
+        # alltarg = ff['TRUTH'].read(columns=['FLUX_R', 'TARGETID'])
+        # elgtarg = ff['TRUTH_ELG'].read(columns=['OIIFLUX', 'TARGETID'])
+        # ww = np.isin(alltarg['TARGETID'], elgtarg['TARGETID'])
+        # oii = np.log10( 1e17 * elgtarg['OIIFLUX'] )
+        # rmag = 22.5 - 2.5 * np.log10( alltarg['FLUX_R'][ww] )
+        # 
+        # def statsinbins(xx, yy, binsize=0.1, minpts=10):
+        #     xmin = xx.min()
+        #     xmax = xx.max()
+        #     nbin = int( (np.nanmax(xx) - np.nanmin(xx) ) / binsize )
+        #     stats = np.zeros(nbin, [
+        #         ('xmean', 'f4'), ('xmedian', 'f4'), ('xbin', 'f4'), ('npts', 'i4'),
+        #         ('ymedian', 'f4'), ('ymean', 'f4'), ('ystd', 'f4'), ('y25', 'f4'), ('y75', 'f4')])
+        #     _xbin = np.linspace(xx.min(), xx.max(), nbin)
+        #     idx  = np.digitize(xx, _xbin)
+        #     for kk in range(nbin):
+        #         these = idx == kk
+        #         npts = np.count_nonzero( oii[these] )
+        #         stats['xbin'][kk] = _xbin[kk]
+        #         stats['npts'][kk] = npts
+        #         if npts > 0:
+        #             stats['xmedian'][kk] = np.nanmedian( xx[these] )
+        #             stats['xmean'][kk] = np.nanmean( xx[these] )
+        #             stats['ystd'][kk] = np.nanstd( yy[these] )
+        #             stats['ymean'][kk] = np.nanmean( yy[these] )
+        #             qq = np.nanpercentile( yy[these], [25, 50, 75] )
+        #             stats['y25'][kk] = qq[0]
+        #             stats['ymedian'][kk] = qq[1]
+        #             stats['y75'][kk] = qq[2]
+        #     keep = stats['npts'] > minpts
+        #     return stats[keep]
+        # stats = statsinbins(rmag, oii, binsize=0.05, minpts=10)
+        # rmagpivot = 22
+        # coeff_median = np.polyfit(stats['xbin'] - rmagpivot, stats['ymedian'], 2)
+        # coeff_scatter = np.polyfit(stats['xbin'] - rmagpivot, stats['ystd'], 2)
+        # 
+        # fig, ax = plt.subplots()
+        # ax.hexbin(rmag, oii, mincnt=1, cmap='viridis', bins='log', gridsize=60)
+        # ax.set_xlabel('r (AB mag, no scatter or extinction)')
+        # ax.set_ylabel(r'$\log_{10} [{\rm OII}]\ \ (10^{-17}\ {\rm erg}\ {\rm s}^{-1}\ {\rm cm}^{-2})$')
+        # ax.plot(stats['xbin'], stats['ymedian'], color='k', ls='-')
+        # ax.plot(stats['xbin'], stats['y75'], color='k', ls='--')
+        # ax.plot(stats['xbin'], stats['y25'], color='k', ls='--')
+        # ax.plot(stats['xbin'], np.polyval(coeff_median, stats['xbin'] - rmagpivot), color='red')
+        # fig.savefig('/global/homes/i/ioannis/rmag-vs-oiiflux.png')
+
+        if target_name.upper() == 'ELG' and gmmout is not None:
+            rmagpivot = 22
+            rand = np.random.RandomState(seed)
+
+            oiicoeff_median = np.array([ -5.31384197e-04, -4.24876618e-01, 1.17861064e+00])
+            oiicoeff_scatter = np.array([-0.00188197, -0.00077902, 0.30842156])
+            oiiflux = np.polyval(oiicoeff_median, gmmout['MAG'] - rmagpivot)
+            oiiflux_sigma = np.polyval(oiicoeff_scatter, gmmout['MAG'] - rmagpivot)
+            for ii, sigma in enumerate(oiiflux_sigma):
+                if sigma < 0: # edge case
+                    sigma = np.polyval(oiicoeff_scatter, 0) 
+                oiiflux[ii] += rand.normal(loc=0, scale=sigma)
+
+            gmmout.update({'OIIFLUX': 1e-17 * oiiflux})
+
         # Pack into a basic dictionary.
         out = {'TARGET_NAME': target_name, 'MOCKFORMAT': 'gaussianfield',
                'HEALPIX': allpix, 'NSIDE': nside, 'WEIGHT': weight,
@@ -1323,7 +1426,204 @@ class ReadGaussianField(SelectTargets):
 
         # Optionally compute the mean mock density.
         if mock_density:
-            out['MOCK_DENSITY'] = self.mock_density(mockfile=mockfile)
+            out['MOCK_DENSITY'] = self.mock_density(mockfile=mockfile, zmax_qso=zmax_qso)
+
+        return out
+
+class ReadBuzzard(SelectTargets):
+    """Read a Buzzard style mock catalog."""
+    cached_pixweight = None
+    
+    def __init__(self, **kwargs):
+        super(ReadBuzzard, self).__init__(**kwargs)
+        
+    def readmock(self, mockfile=None, healpixels=[], nside=[], nside_buzzard=8,
+                 target_name='', magcut=None, only_coords=False, seed=None):
+        """Read the catalog.
+
+        Parameters
+        ----------
+        mockfile : :class:`str`
+            Full path to the mock catalog to read.
+        healpixels : :class:`int`
+            Healpixel number to read.
+        nside : :class:`int`
+            Healpixel nside corresponding to healpixels.
+        nside_buzzard : :class:`int`
+            Healpixel nside indicating how the mock on-disk has been organized.
+            Defaults to 8.
+        target_name : :class:`str`
+            Name of the target being read (e.g., ELG, LRG).
+        magcut : :class:`float`
+            Magnitude cut (hard-coded to DECam r-band) to subselect targets
+            brighter than magcut. 
+        only_coords : :class:`bool`, optional
+            To get some improvement in speed, only read the target coordinates
+            and some other basic info.
+        seed : :class:`int`, optional
+            Seed for reproducibility and random number generation.
+
+        Returns
+        -------
+        :class:`dict`
+            Dictionary with various keys (to be documented).
+
+        Raises
+        ------
+        IOError
+            If the top-level Galaxia directory is not found.
+        ValueError
+            (1) If either mockfile or nside_galaxia are not defined; (2) if
+            healpixels or nside are not scalar inputs; or (3) if the input
+            target_name is not recognized.
+
+        """
+        from desitarget.targets import encode_targetid
+        from desitarget.mock.io import get_healpix_dir, findfile
+
+        if mockfile is None:
+            log.warning('Mockfile input is required.')
+            raise ValueError
+
+        try:
+            mockfile = mockfile.format(**os.environ)
+        except KeyError as e:
+            log.warning('Environment variable not set for mockfile: {}'.format(e))
+            raise ValueError
+        
+        if nside_buzzard is None:
+            log.warning('Nside_buzzard input is required.')
+            raise ValueError
+        
+        mockfile_nside = os.path.join(mockfile, str(nside_buzzard))
+        if not os.path.isdir(mockfile_nside):
+            log.warning('Buzzard top-level directory {} not found!'.format(mockfile_nside))
+            raise IOError
+
+        # Because of the size of the Buzzard mock, healpixels (and nside) must
+        # be scalars.
+        if len(np.atleast_1d(healpixels)) != 1 and len(np.atleast_1d(nside)) != 1:
+            log.warning('Healpixels and nside must be scalar inputs.')
+            raise ValueError
+
+        if self.cached_pixweight is None:
+            pixweight = load_pixweight(nside, pixmap=self.pixmap)
+            ReadBuzzard.cached_pixweight = (pixweight, nside)
+        else:
+            pixweight, cached_nside = ReadBuzzard.cached_pixweight
+            if cached_nside != nside:
+                pixweight = load_pixweight(nside, pixmap=self.pixmap)
+                ReadBuzzard.cached_pixweight = (pixweight, nside)
+            else:
+                log.debug('Using cached pixel weight map.')
+                pixweight, _ = ReadBuzzard.cached_pixweight
+
+        # Get the set of nside_buzzard pixels that belong to the desired
+        # healpixels (which have nside).  This will break if healpixels is a
+        # vector.
+        theta, phi = hp.pix2ang(nside, healpixels, nest=True)
+        pixnum = hp.ang2pix(nside_buzzard, theta, phi, nest=True)
+
+        buzzardfile = findfile(filetype='Buzzard_v1.6_lensed', nside=nside_buzzard, pixnum=pixnum,
+                               basedir=mockfile_nside, ext='fits')
+        if len(buzzardfile) == 0:
+            log.warning('File {} not found!'.format(buzzardfile))
+            raise IOError
+
+        log.info('Reading {}'.format(buzzardfile))
+        radec = fitsio.read(buzzardfile, columns=['RA', 'DEC'], upper=True, ext=1)
+        nobj = len(radec)
+
+        objid = np.arange(nobj)
+        mockid = encode_targetid(objid=objid, brickid=pixnum, mock=1)
+
+        allpix = footprint.radec2pix(nside, radec['RA'], radec['DEC'])
+
+        fracarea = pixweight[allpix]
+        cut = np.where( np.in1d(allpix, healpixels) * (fracarea > 0) )[0] # force DESI footprint
+        if np.all(cut[1:] >= cut[:-1]) is False:
+            log.fatal('Index cut must be monotonically increasing, otherwise fitsio will resort it!')
+            raise ValueError
+
+        nobj = len(cut)
+        if nobj == 0:
+            log.warning('No {}s in healpixels {}!'.format(target_name, healpixels))
+            return dict()
+
+        log.info('Trimmed to {} {}s in {} healpixel(s)'.format(
+            nobj, target_name, len(np.atleast_1d(healpixels))))
+
+        mockid = mockid[cut]
+        objid = objid[cut]
+        allpix = allpix[cut]
+        weight = 1 / fracarea[cut]
+        ra = radec['RA'][cut].astype('f8') % 360.0 # enforce 0 < ra < 360
+        dec = radec['DEC'][cut].astype('f8')
+        del radec
+
+        cols = ['Z', 'TMAG']
+        #cols = ['Z', 'COEFFS', 'TMAG']
+        data = fitsio.read(buzzardfile, columns=cols, upper=True, ext=1, rows=cut)
+        zz = data['Z'].astype('f4')
+        tmag = data['TMAG'].astype('f4')
+
+        if magcut:
+            cut = tmag[:, 2] < magcut # r-band
+            if np.count_nonzero(cut) == 0:
+                log.warning('No objects with r < {}!'.format(magcut))
+                return dict()
+            else:
+                mockid = mockid[cut]
+                objid = objid[cut]
+                allpix = allpix[cut]
+                weight = weight[cut]
+                ra = ra[cut]
+                dec = dec[cut]
+                zz = zz[cut]
+                tmag = tmag[np.where(cut)[0], :]
+
+                nobj = len(ra)
+                log.info('Trimmed to {} {}s with r < {}.'.format(nobj, target_name, magcut))
+        
+        # Optionally (for a little more speed) only return some basic info. 
+        if only_coords:
+            return {'MOCKID': mockid, 'RA': ra, 'DEC': dec, 'Z': zz,
+                    'WEIGHT': weight, 'NSIDE': nside}
+
+        isouth = self.is_south(dec)
+
+        ## Get photometry and morphologies by sampling from the Gaussian
+        ## mixture models.
+        #log.info('Sampling from {} Gaussian mixture model.'.format(target_name))
+        #gmmout = self.sample_GMM(nobj, target=target_name, isouth=isouth,
+        #                         seed=seed, prior_redshift=zz)
+        #gmmout = None
+
+        #gmag = data['TMAG'][:, 1].astype('f4') # DES g-band, no MW extinction 
+        rmag = data['TMAG'][:, 2].astype('f4') # DES r-band, no MW extinction 
+        zmag = data['TMAG'][:, 4].astype('f4') # DES z-band, no MW extinction 
+
+        # Pack into a basic dictionary.
+        out = {'TARGET_NAME': target_name, 'MOCKFORMAT': 'buzzard',
+            'HEALPIX': allpix, 'NSIDE': nside, 'WEIGHT': weight,
+            'MOCKID': mockid, 'BRICKNAME': self.Bricks.brickname(ra, dec),
+            'BRICKID': self.Bricks.brickid(ra, dec),
+            'RA': ra, 'DEC': dec, 'Z': zz,
+            'MAG': rmag, 'MAGFILTER': np.repeat('decam2014-r', nobj),
+            #'GMAG': gmag, 'MAGFILTER-G': np.repeat('decam2014-g', nobj),
+            'ZMAG': zmag, 'MAGFILTER-Z': np.repeat('decam2014-z', nobj),
+            'SOUTH': isouth}
+            
+        #if gmmout is not None:
+        #    out.update(gmmout)
+
+        # Add MW transmission and the imaging depth.
+        self.mw_transmission(out)
+        self.imaging_depth(out)
+
+        ## Optionally compute the mean mock density.
+        #if mock_density:
+        #    out['MOCK_DENSITY'] = self.mock_density(mockfile=mockfile)
 
         return out
 
@@ -1352,8 +1652,7 @@ class ReadUniformSky(SelectTargets):
             Compute and return the median target density in the mock.  Defaults
         only_coords : :class:`bool`, optional
             To get some improvement in speed, only read the target coordinates
-            and some other basic info.
-            to False.
+            and some other basic info.  Defaults to False.
 
         Returns
         -------
@@ -1404,7 +1703,7 @@ class ReadUniformSky(SelectTargets):
                 ra, dec, allpix, pixweight = _get_radec(mockfile, nside, self.pixmap)
                 ReadUniformSky.cached_radec = (mockfile, nside, ra, dec, allpix, pixweight)
             else:
-                log.info('Using cached coordinates, healpixels, and pixel weights from {}'.format(mockfile))
+                log.debug('Using cached coordinates, healpixels, and pixel weights from {}'.format(mockfile))
                 _, _, ra, dec, allpix, pixweight = ReadUniformSky.cached_radec
 
         mockid = np.arange(len(ra)) # unique ID/row number
@@ -1462,7 +1761,8 @@ class ReadGalaxia(SelectTargets):
         super(ReadGalaxia, self).__init__(**kwargs)
 
     def readmock(self, mockfile=None, healpixels=[], nside=[], nside_galaxia=8, 
-                 target_name='MWS_MAIN', magcut=None):
+                 target_name='MWS_MAIN', magcut=None, faintstar_mockfile=None,
+                 faintstar_magcut=None, seed=None):
         """Read the catalog.
 
         Parameters
@@ -1480,7 +1780,15 @@ class ReadGalaxia(SelectTargets):
             Name of the target being read (e.g., MWS_MAIN).
         magcut : :class:`float`
             Magnitude cut (hard-coded to SDSS r-band) to subselect targets
-            brighter than magcut. 
+            brighter than magcut.
+        faintstar_mockfile : :class:`str`, optional
+            Full path to the top-level directory of the Galaxia faint star mock
+            catalog.
+        faintstar_magcut : :class:`float`, optional
+            Magnitude cut (hard-coded to SDSS r-band) to subselect faint star
+            targets brighter than magcut.
+        seed : :class:`int`, optional
+            Seed for reproducibility and random number generation.
 
         Returns
         -------
@@ -1519,6 +1827,8 @@ class ReadGalaxia(SelectTargets):
             log.warning('Galaxia top-level directory {} not found!'.format(mockfile_nside))
             raise IOError
 
+        rand = np.random.RandomState(seed)
+        
         # Because of the size of the Galaxia mock, healpixels (and nside) must
         # be scalars.
         if len(np.atleast_1d(healpixels)) != 1 and len(np.atleast_1d(nside)) != 1:
@@ -1534,7 +1844,7 @@ class ReadGalaxia(SelectTargets):
                 pixweight = load_pixweight(nside, pixmap=self.pixmap)
                 ReadGalaxia.cached_pixweight = (pixweight, nside)
             else:
-                log.info('Using cached pixel weight map.')
+                log.debug('Using cached pixel weight map.')
                 pixweight, _ = ReadGalaxia.cached_pixweight
 
         # Get the set of nside_galaxia pixels that belong to the desired
@@ -1543,11 +1853,10 @@ class ReadGalaxia(SelectTargets):
         theta, phi = hp.pix2ang(nside, healpixels, nest=True)
         pixnum = hp.ang2pix(nside_galaxia, theta, phi, nest=True)
 
-        if target_name.upper() == 'MWS_MAIN':
+        if target_name.upper() == 'MWS_MAIN' or target_name.upper() == 'CONTAM_STAR':
             filetype = 'mock_allsky_galaxia_desi'
         elif target_name.upper() == 'FAINTSTAR':
-            filetype = ('mock_superfaint_allsky_galaxia_desi_b10_cap_north',
-                        'mock_superfaint_allsky_galaxia_desi_b10_cap_south')
+            filetype = 'mock_superfaint_allsky_galaxia_desi_b10'
         else:
             log.warning('Unrecognized target name {}!'.format(target_name))
             raise ValueError
@@ -1582,6 +1891,9 @@ class ReadGalaxia(SelectTargets):
             log.warning('No {}s in healpixels {}!'.format(target_name, healpixels))
             return dict()
 
+        log.info('Trimmed to {} {}s in {} healpixel(s)'.format(
+            nobj, target_name, len(np.atleast_1d(healpixels))))
+
         mockid = mockid[cut]
         objid = objid[cut]
         allpix = allpix[cut]
@@ -1590,16 +1902,43 @@ class ReadGalaxia(SelectTargets):
         dec = radec['DEC'][cut].astype('f8')
         del radec
 
-        cols = ['V_HELIO', 'SDSSU_TRUE_NODUST', 'SDSSG_TRUE_NODUST',
-                'SDSSR_TRUE_NODUST', 'SDSSI_TRUE_NODUST', 'SDSSZ_TRUE_NODUST',
-                'SDSSR_OBS', 'TEFF', 'LOGG', 'FEH']
+        # Only the MWS_MAIN mock has Gaia and TRUE_VHELIO.
+        cols = ['TRUE_MAG_R_SDSS_NODUST', 'TRUE_MAG_G_SDSS_NODUST', 'TRUE_MAG_Z_SDSS_NODUST',
+                'TRUE_TEFF', 'TRUE_LOGG', 'TRUE_FEH']
+        if target_name.upper() == 'MWS_MAIN' or target_name.upper() == 'CONTAM_STAR':
+            cols = cols + ['TRUE_VHELIO', 'GAIA_PHOT_G_MEAN_MAG', 'PMRA', 'PMDEC', 'PM_RA_IVAR',
+                           'PM_DEC_IVAR', 'PARALLAX', 'PARALLAX_IVAR']
         data = fitsio.read(galaxiafile, columns=cols, upper=True, ext=1, rows=cut)
-        zz = (data['V_HELIO'].astype('f4') / C_LIGHT).astype('f4')
-        mag = data['SDSSR_TRUE_NODUST'].astype('f4') # SDSS r-band, extinction-corrected
-        mag_obs = data['SDSSR_OBS'].astype('f4')     # SDSS r-band, observed
-        teff = 10**data['TEFF'].astype('f4')         # log10!
-        logg = data['LOGG'].astype('f4')
-        feh = data['FEH'].astype('f4')
+        mag = data['TRUE_MAG_R_SDSS_NODUST'].astype('f4')  # SDSS r-band, extinction-corrected
+        gmag = data['TRUE_MAG_G_SDSS_NODUST'].astype('f4') # SDSS g-band, extinction-corrected
+        zmag = data['TRUE_MAG_Z_SDSS_NODUST'].astype('f4') # SDSS z-band, extinction-corrected
+        teff = 10**data['TRUE_TEFF'].astype('f4')          # log10!
+        logg = data['TRUE_LOGG'].astype('f4')
+        feh = data['TRUE_FEH'].astype('f4')
+
+        if target_name.upper() == 'MWS_MAIN' or target_name.upper() == 'CONTAM_STAR':
+            zz = (data['TRUE_VHELIO'].astype('f4') / C_LIGHT).astype('f4')
+        else:
+            zz = (rand.normal(loc=0.0, scale=200.0, size=len(data)) / C_LIGHT).astype('f4') # Hack!
+
+        if target_name.upper() == 'MWS_MAIN' or target_name.upper() == 'CONTAM_STAR':
+            ref_id = mockid
+            gaia_g = data['GAIA_PHOT_G_MEAN_MAG'].astype('f4')
+            gaia_pmra = data['PMRA'].astype('f4')
+            gaia_pmdec = data['PMDEC'].astype('f4')
+            gaia_pmra_ivar = data['PM_RA_IVAR'].astype('f4')
+            gaia_pmdec_ivar = data['PM_DEC_IVAR'].astype('f4')
+            gaia_parallax = data['PARALLAX'].astype('f4')
+            gaia_parallax_ivar = data['PARALLAX_IVAR'].astype('f4')
+        else:
+            ref_id = np.zeros(nobj).astype('f4')-1 # no data is -1
+            gaia_g = np.zeros(nobj).astype('f4')
+            gaia_pmra = np.zeros(nobj).astype('f4')
+            gaia_pmdec = np.zeros(nobj).astype('f4')
+            gaia_pmra_ivar = np.ones(nobj).astype('f4')  # default is unity
+            gaia_pmdec_ivar = np.ones(nobj).astype('f4') # default is unity
+            gaia_parallax = np.zeros(nobj).astype('f4')
+            gaia_parallax_ivar = np.ones(nobj).astype('f4') # default is unity
 
         if magcut:
             cut = mag < magcut
@@ -1615,50 +1954,39 @@ class ReadGalaxia(SelectTargets):
                 dec = dec[cut]
                 zz = zz[cut]
                 mag = mag[cut]
-                mag_obs = mag_obs[cut]
+                gmag = gmag[cut]
+                zmag = zmag[cut]
                 teff = teff[cut]
                 logg = logg[cut]
                 feh = feh[cut]
+
+                ref_id = ref_id[cut]
+                gaia_g = gaia_g[cut]
+                gaia_pmra = gaia_pmra[cut]
+                gaia_pmdec = gaia_pmdec[cut]
+                gaia_pmra_ivar = gaia_pmra_ivar[cut]
+                gaia_pmdec_ivar = gaia_pmdec_ivar[cut]
+                gaia_parallax = gaia_parallax[cut]
+                gaia_parallax_ivar = gaia_parallax_ivar[cut]
+                
                 nobj = len(ra)
                 log.info('Trimmed to {} {}s with r < {}.'.format(nobj, target_name, magcut))
 
-        # Temporary hack to read some Gaia columns from a separate file, but
-        # only for the MWS_MAIN mocks!
-        if target_name.upper() == 'MWS_MAIN':
-            gaiafile = galaxiafile.replace('mock_', 'gaia_mock_')
-            if os.path.isfile(gaiafile):
-                cols = ['G_GAIA', 'PM_RA_STAR_GAIA', 'PM_DEC_GAIA', 'PARALLAX_GAIA',
-                        'PARALLAX_GAIA_ERROR', 'PM_RA_GAIA_ERROR', 'PM_DEC_GAIA_ERROR']
-                gaia = fitsio.read(gaiafile, columns=cols, upper=True, ext=1, rows=cut)
-                    
-        elif target_name.upper() == 'FAINTSTAR': # Hack for FAINTSTAR
-
-            #from astropy.table import Table
-            #morecols = ['PM_RA', 'PM_DEC', 'DM']
-            #moredata = fitsio.read(galaxiafile, columns=morecols, upper=True, ext=1, rows=objid)
-
-            gaia = Table()
-            gaia['G_GAIA'] = mag # hack!
-            gaia['PM_RA_STAR_GAIA'] = np.zeros(nobj)  # moredata['PM_RA']
-            gaia['PM_DEC_GAIA'] = np.zeros(nobj)      # moredata['PM_DEC']
-            gaia['PARALLAX_GAIA'] = np.zeros(nobj)+20 # moredata['D_HELIO'] / 206265.
-            gaia['PARALLAX_GAIA_ERROR'] = np.zeros(nobj)+1e8
-            gaia['PM_RA_GAIA_ERROR'] = np.zeros(nobj)+1e8
-            gaia['PM_DEC_GAIA_ERROR'] = np.zeros(nobj)+1e8
-        else:
-            pass
-        
         # Pack into a basic dictionary.
         out = {'TARGET_NAME': target_name, 'MOCKFORMAT': 'galaxia',
                'HEALPIX': allpix, 'NSIDE': nside, 'WEIGHT': weight,
                'MOCKID': mockid, 'BRICKNAME': self.Bricks.brickname(ra, dec),
                'BRICKID': self.Bricks.brickid(ra, dec),
-               'RA': ra, 'DEC': dec, 'Z': zz, 'MAG': mag, 'MAG_OBS': mag_obs,
+               'RA': ra, 'DEC': dec, 'Z': zz,
                'TEFF': teff, 'LOGG': logg, 'FEH': feh,
-               'MAGFILTER': np.repeat('sdss2010-r', nobj),
+               'MAG': mag, 'MAGFILTER': np.repeat('sdss2010-r', nobj),
+               #'GMAG': gmag,
+               'ZMAG': zmag,
                
-               'REF_ID': mockid,
-               'GAIA_PHOT_G_MEAN_MAG': gaia['G_GAIA'].astype('f4'),
+               'SOUTH': self.is_south(dec), 'TYPE': np.repeat('PSF', nobj),
+
+               'REF_ID': ref_id,
+               'GAIA_PHOT_G_MEAN_MAG': gaia_g,
                #'GAIA_PHOT_G_MEAN_FLUX_OVER_ERROR' - f4
                'GAIA_PHOT_BP_MEAN_MAG': np.zeros(nobj).astype('f4'), # placeholder
                #'GAIA_PHOT_BP_MEAN_FLUX_OVER_ERROR' - f4
@@ -1666,25 +1994,35 @@ class ReadGalaxia(SelectTargets):
                #'GAIA_PHOT_RP_MEAN_FLUX_OVER_ERROR' - f4
                'GAIA_ASTROMETRIC_EXCESS_NOISE': np.zeros(nobj).astype('f4'), # placeholder
                #'GAIA_DUPLICATED_SOURCE' - b1 # default is False
-               'PARALLAX': gaia['PARALLAX_GAIA'].astype('f4'),
-               'PARALLAX_IVAR': np.zeros(nobj).astype('f4'),
-               'PMRA': gaia['PM_RA_STAR_GAIA'].astype('f4'),
-               'PMRA_IVAR': np.zeros(nobj).astype('f4'),
-               'PMDEC': gaia['PM_DEC_GAIA'].astype('f4'), # no _STAR_!
-               'PMDEC_IVAR': np.zeros(nobj).astype('f4'),
-              
-               'SOUTH': self.is_south(dec), 'TYPE': 'PSF'}
-
-        # Handle ivars -- again, a temporary hack
-        for outkey, gaiakey in zip( ('PARALLAX_IVAR', 'PMRA_IVAR', 'PMDEC_IVAR'),
-                                     ('PARALLAX_GAIA_ERROR', 'PM_RA_GAIA_ERROR', 'PM_DEC_GAIA_ERROR') ):
-            good = gaia[gaiakey] > 0
-            if np.sum(good) > 0:
-                out[outkey][good] = (1/gaia[gaiakey]**2).astype('f4')
+               'PARALLAX': gaia_parallax,
+               'PARALLAX_IVAR': gaia_parallax_ivar,
+               'PMRA': gaia_pmra,
+               'PMRA_IVAR': gaia_pmra_ivar,
+               'PMDEC': gaia_pmdec,
+               'PMDEC_IVAR': gaia_pmdec_ivar}
 
         # Add MW transmission and the imaging depth.
         self.mw_transmission(out)
         self.imaging_depth(out)
+
+        # Optionally include faint stars.
+        if faintstar_mockfile is not None:
+            log.debug('Supplementing with FAINTSTAR mock targets.')
+            faintdata = ReadGalaxia().readmock(mockfile=faintstar_mockfile, target_name='FAINTSTAR',
+                                               healpixels=healpixels, nside=nside,
+                                               nside_galaxia=nside_galaxia, magcut=faintstar_magcut,
+                                               seed=seed)
+            
+            # Stack and shuffle so we get a mix of bright and faint stars.
+            rand = np.random.RandomState(seed)
+            newnobj = nobj + len(faintdata['RA'])
+            newindx = rand.choice(newnobj, size=newnobj, replace=False)
+
+            for key in out.keys():
+                if type(out[key]) == np.ndarray:
+                    out[key] = np.hstack( (out[key], faintdata[key]) )[newindx]
+
+            del faintdata
 
         return out
 
@@ -1695,7 +2033,7 @@ class ReadLyaCoLoRe(SelectTargets):
 
     def readmock(self, mockfile=None, healpixels=None, nside=None,
                  target_name='LYA', nside_lya=16, zmin_lya=None,
-                 mock_density=False):
+                 mock_density=False, only_coords=False, seed=None):
         """Read the catalog.
 
         Parameters
@@ -1717,6 +2055,11 @@ class ReadLyaCoLoRe(SelectTargets):
         mock_density : :class:`bool`, optional
             Compute and return the median target density in the mock.  Defaults
             to False.
+        only_coords : :class:`bool`, optional
+            Only read the target coordinates and some other basic info.
+            Defaults to False.
+        seed : :class:`int`, optional
+            Seed for reproducibility and random number generation.
 
         Returns
         -------
@@ -1731,6 +2074,17 @@ class ReadLyaCoLoRe(SelectTargets):
             If mockfile, nside, or nside_lya are not defined.
 
         """
+        from astropy import cosmology
+
+        try:
+            from simqso.sqbase import ContinuumKCorr
+            from simqso.sqmodels import BOSS_DR9_PLEpivot
+            from simqso.sqgrids import generateQlfPoints
+        except ImportError:
+            message = 'Please install https://github.com/imcgreer/simqso'
+            log.error(message)
+            raise(ImportError(message))
+            
         if mockfile is None:
             log.warning('Mockfile input is required.')
             raise ValueError
@@ -1831,15 +2185,62 @@ class ReadLyaCoLoRe(SelectTargets):
             mockpix = mockpix[cut]
             mockid = mockid[cut]
 
+        # Optionally (for a little more speed) only return some basic info. 
+        if only_coords:
+            return {'MOCKID': mockid, 'RA': ra, 'DEC': dec, 'Z': zz,
+                    'WEIGHT': weight, 'NSIDE': nside}
+
         # Build the full filenames.
         lyafiles = []
         for mpix in mockpix:
             lyafiles.append("%s/%d/%d/transmission-%d-%d.fits"%(
                 mockdir, mpix//100, mpix, nside_lya, mpix))
 
-        # ToDo: draw magnitudes from an appropriate luminosity function!
-        # 
+        isouth = self.is_south(dec)
+
+        # Draw apparent magnitudes from an BOSS/DR9 QSO luminosity function
+        # (code taken from also desisim.templates.SIMQSO).
+        #
+        #   from speclite import filters
+        #   print(filters.load_filters('BASS-r').effective_wavelengths.value,
+        #         filters.load_filters('decam2014-r').effective_wavelengths.value)
+
+        magrange = (17, 23.5)
+        zrange = (np.min(zz), np.max(zz))
+        
+        normfilter_north, normfilter_south = 'BASS-r', 'DECam-r'
+        weff_normfilter_north, weff_normfilter_south = 6437.79282937, 6469.62203811
+        
+        kcorr_north = ContinuumKCorr(normfilter_north, 1450, effWaveBand=weff_normfilter_north)
+        kcorr_south = ContinuumKCorr(normfilter_south, 1450, effWaveBand=weff_normfilter_south)
+        qlf = BOSS_DR9_PLEpivot(cosmo=cosmology.core.FlatLambdaCDM(70.0, 0.3))
+
+        mag = np.zeros(nobj).astype('f4')
+        magfilter = np.zeros(nobj).astype('U15')
+
+        south = np.where(isouth)[0]
+        north = np.where(~isouth)[0]
+        for these, issouth in zip( (north, south), (False, True) ):
+            if len(these) > 0:
+                if issouth:
+                    qsometa = generateQlfPoints(qlf, magrange, zrange, zin=zz[these],
+                                                kcorr=kcorr_south, qlfseed=seed,
+                                                gridseed=seed)
+                    mag[these] = qsometa.data['appMag']
+                    magfilter[these] = normfilter_north
+                else:
+                    qsometa = generateQlfPoints(qlf, magrange, zrange, zin=zz[these],
+                                                kcorr=kcorr_north, qlfseed=seed,
+                                                gridseed=seed)
+                    mag[these] = qsometa.data['appMag']
+                    magfilter[these] = normfilter_south
             
+        # Get photometry and morphologies by sampling from the Gaussian
+        # mixture models.
+        log.info('Sampling from {} Gaussian mixture model.'.format(target_name))
+        gmmout = self.sample_GMM(nobj, target='QSO', isouth=isouth,
+                                 seed=seed, prior_redshift=zz, prior_mag=mag)
+
         # Pack into a basic dictionary.
         out = {'TARGET_NAME': target_name, 'MOCKFORMAT': 'CoLoRe',
                'HEALPIX': allpix, 'NSIDE': nside, 'WEIGHT': weight,
@@ -1848,7 +2249,10 @@ class ReadLyaCoLoRe(SelectTargets):
                'BRICKNAME': self.Bricks.brickname(ra, dec),
                'BRICKID': self.Bricks.brickid(ra, dec),
                'RA': ra, 'DEC': dec, 'Z': zz, 'Z_NORSD': zz_norsd,
-               'SOUTH': self.is_south(dec), 'TYPE': 'PSF'}
+               'MAG': mag, 'MAGFILTER': magfilter,
+               'SOUTH': isouth}
+        if gmmout is not None:
+            out.update(gmmout)
 
         # Add MW transmission and the imaging depth.
         self.mw_transmission(out)
@@ -1972,7 +2376,7 @@ class ReadMXXL(SelectTargets):
                 ra, dec, zz, rmag, absmag, gr, allpix, pixweight = _read_mockfile(mockfile, nside, self.pixmap)
                 ReadMXXL.cached_radec = (mockfile, nside, ra, dec, zz, rmag, absmag, gr, allpix, pixweight)
             else:
-                log.info('Using cached coordinates, healpixels, and pixel weights from {}'.format(mockfile))
+                log.debug('Using cached coordinates, healpixels, and pixel weights from {}'.format(mockfile))
                 _, _, ra, dec, zz, rmag, absmag, gr, allpix, pixweight = ReadMXXL.cached_radec
 
         mockid = np.arange(len(ra)) # unique ID/row number
@@ -2134,7 +2538,7 @@ class ReadGAMA(SelectTargets):
                 ra, dec, allpix, pixweight = _get_radec(mockfile, nside, self.pixmap)
                 ReadGAMA.cached_radec = (mockfile, nside, ra, dec, allpix, pixweight)
             else:
-                log.info('Using cached coordinates, healpixels, and pixel weights from {}'.format(mockfile))
+                log.debug('Using cached coordinates, healpixels, and pixel weights from {}'.format(mockfile))
                 _, _, ra, dec, allpix, pixweight = ReadGAMA.cached_radec
 
         mockid = np.arange(len(ra)) # unique ID/row number
@@ -2260,7 +2664,7 @@ class ReadMWS_WD(SelectTargets):
                 ra, dec, allpix, pixweight = _get_radec(mockfile, nside, self.pixmap)
                 ReadMWS_WD.cached_radec = (mockfile, nside, ra, dec, allpix, pixweight)
             else:
-                log.info('Using cached coordinates, healpixels, and pixel weights from {}'.format(mockfile))
+                log.debug('Using cached coordinates, healpixels, and pixel weights from {}'.format(mockfile))
                 _, _, ra, dec, allpix, pixweight = ReadMWS_WD.cached_radec
 
         mockid = np.arange(len(ra)) # unique ID/row number
@@ -2331,7 +2735,7 @@ class ReadMWS_WD(SelectTargets):
                'PMDEC': gaia_pmdec,
                'PMDEC_IVAR': np.ones(nobj).astype('f4'), # placeholder!
                
-               'SOUTH': self.is_south(dec), 'TYPE': 'PSF'}
+               'SOUTH': self.is_south(dec), 'TYPE': np.repeat('PSF', nobj)}
 
         # Add MW transmission and the imaging depth.
         self.mw_transmission(out)
@@ -2417,7 +2821,7 @@ class ReadMWS_NEARBY(SelectTargets):
                 ra, dec, allpix, pixweight = _get_radec(mockfile, nside, self.pixmap)
                 ReadMWS_NEARBY.cached_radec = (mockfile, nside, ra, dec, allpix, pixweight)
             else:
-                log.info('Using cached coordinates, healpixels, and pixel weights from {}'.format(mockfile))
+                log.debug('Using cached coordinates, healpixels, and pixel weights from {}'.format(mockfile))
                 _, _, ra, dec, allpix, pixweight = ReadMWS_NEARBY.cached_radec
         
         mockid = np.arange(len(ra)) # unique ID/row number
@@ -2442,23 +2846,50 @@ class ReadMWS_NEARBY(SelectTargets):
         ra = ra[cut]
         dec = dec[cut]
 
-        cols = ['RADIALVELOCITY', 'MAGG', 'TEFF', 'LOGG', 'FEH', 'SPECTRALTYPE']
+        cols = ['TRUE_RADIAL_VELOCITY', 'TRUE_TEFF', 'TRUE_LOGG', 'TRUE_FEH', 'TRUE_TYPE',
+                'GAIA_PHOT_G_MEAN_MAG', 'GAIA_PHOT_BP_MEAN_MAG', 'GAIA_PHOT_RP_MEAN_MAG',
+                'PMRA', 'PMDEC', 'PARALLAX']
         data = fitsio.read(mockfile, columns=cols, upper=True, ext=1, rows=cut)
-        zz = (data['RADIALVELOCITY'] / C_LIGHT).astype('f4')
-        mag = data['MAGG'].astype('f4') # SDSS g-band
-        teff = data['TEFF'].astype('f4')
-        logg = data['LOGG'].astype('f4')
-        feh = data['FEH'].astype('f4')
-        templatesubtype = data['SPECTRALTYPE']
+        zz = (data['TRUE_RADIAL_VELOCITY'] / C_LIGHT).astype('f4')
+        mag = data['GAIA_PHOT_G_MEAN_MAG'].astype('f4') # not quite SDSS g-band but very close 
+        teff = data['TRUE_TEFF'].astype('f4')
+        logg = data['TRUE_LOGG'].astype('f4')
+        feh = data['TRUE_FEH'].astype('f4')
+        templatesubtype = data['TRUE_TYPE']
 
-        # Pack into a basic dictionary.  Is the normalization filter g-band???
+        gaia_g = data['GAIA_PHOT_G_MEAN_MAG'].astype('f4')
+        gaia_bp = data['GAIA_PHOT_BP_MEAN_MAG'].astype('f4')
+        gaia_rp = data['GAIA_PHOT_RP_MEAN_MAG'].astype('f4')
+        gaia_pmra = data['PMRA'].astype('f4')
+        gaia_pmdec = data['PMDEC'].astype('f4')
+        gaia_parallax = data['PARALLAX'].astype('f4')
+        #gaia_parallax_ivar = (1 / data['PARALLAX_ERROR']**2).astype('f4')
+
+        # Pack into a basic dictionary.
         out = {'TARGET_NAME': target_name, 'MOCKFORMAT': 'mws_100pc',
                'HEALPIX': allpix, 'NSIDE': nside, 'WEIGHT': weight,
                'MOCKID': mockid, 'BRICKNAME': self.Bricks.brickname(ra, dec),
                'BRICKID': self.Bricks.brickid(ra, dec),
                'RA': ra, 'DEC': dec, 'Z': zz, 'MAG': mag, 'TEFF': teff, 'LOGG': logg, 'FEH': feh,
                'MAGFILTER': np.repeat('sdss2010-g', nobj), 'TEMPLATESUBTYPE': templatesubtype,
-               'SOUTH': self.is_south(dec), 'TYPE': 'PSF'}
+
+               'REF_ID': mockid,
+               'GAIA_PHOT_G_MEAN_MAG': gaia_g,
+               #'GAIA_PHOT_G_MEAN_FLUX_OVER_ERROR' - f4
+               'GAIA_PHOT_BP_MEAN_MAG': gaia_bp,
+               #'GAIA_PHOT_BP_MEAN_FLUX_OVER_ERROR' - f4
+               'GAIA_PHOT_RP_MEAN_MAG': gaia_rp,
+               #'GAIA_PHOT_RP_MEAN_FLUX_OVER_ERROR' - f4
+               #'GAIA_ASTROMETRIC_EXCESS_NOISE': gaia_noise,
+               #'GAIA_DUPLICATED_SOURCE' - b1 # default is False
+               'PARALLAX': gaia_parallax,
+               #'PARALLAX_IVAR': gaia_parallax_ivar,
+               'PMRA': gaia_pmra,
+               'PMRA_IVAR': np.ones(nobj).astype('f4'),  # placeholder!
+               'PMDEC': gaia_pmdec,
+               'PMDEC_IVAR': np.ones(nobj).astype('f4'), # placeholder!
+               
+               'SOUTH': self.is_south(dec), 'TYPE': np.repeat('PSF', nobj)}
 
         # Add MW transmission and the imaging depth.
         self.mw_transmission(out)
@@ -2482,8 +2913,7 @@ class QSOMaker(SelectTargets):
         desisim.templates.QSO.  Defaults to True.
 
     """
-    wave, template_maker = None, None
-    GMM_QSO, GMM_nospectra = None, None
+    wave, template_maker, GMM_QSO = None, None, None
     
     def __init__(self, seed=None, use_simqso=True, **kwargs):
         from desisim.templates import SIMQSO, QSO
@@ -2497,6 +2927,7 @@ class QSOMaker(SelectTargets):
 
         if self.wave is None:
             QSOMaker.wave = _default_wave()
+        self.extinction = self.mw_dust_extinction()
 
         if self.template_maker is None:
             if self.use_simqso:
@@ -2507,10 +2938,6 @@ class QSOMaker(SelectTargets):
         if self.GMM_QSO is None:
             self.read_GMM(target='QSO')
 
-        if self.GMM_nospectra is None:
-            gmmfile = resource_filename('desitarget', 'mock/data/quicksurvey_gmm_qso.fits')
-            QSOMaker.GMM_nospectra = GaussianMixtureModel.load(gmmfile)
-            
     def read(self, mockfile=None, mockformat='gaussianfield', healpixels=None,
              nside=None, zmax_qso=None, only_coords=False, mock_density=False,
              **kwargs):
@@ -2560,7 +2987,7 @@ class QSOMaker(SelectTargets):
             
         data = MockReader.readmock(mockfile, target_name=self.objtype,
                                    healpixels=healpixels, nside=nside,
-                                   only_coords=only_coords,
+                                   only_coords=only_coords, seed=self.seed,
                                    zmax_qso=zmax_qso, mock_density=mock_density)
 
         return data
@@ -2607,9 +3034,7 @@ class QSOMaker(SelectTargets):
         if no_spectra:
             flux = []
             meta, objmeta = empty_metatable(nmodel=nobj, objtype=self.objtype)
-            meta['SEED'][:] = rand.randint(2**31, size=nobj)
-            meta['REDSHIFT'][:] = data['Z'][indx]
-            self.sample_gmm_nospectra(meta, rand=rand) # noiseless photometry from pre-computed GMMs
+            self._nospectra_photometry(meta, rand, data, indx, data['TARGET_NAME'])
         else:
             # Sample from the north/south GMMs
             south = np.where( data['SOUTH'][indx] == True )[0]
@@ -2648,12 +3073,12 @@ class QSOMaker(SelectTargets):
                         flux[these, :] = flux1
 
         targets, truth, objtruth = self.populate_targets_truth(
-            data, meta, objmeta, indx=indx, psf=True, use_simqso=self.use_simqso,
+            flux, data, meta, objmeta, indx=indx, use_simqso=self.use_simqso,
             seed=seed, truespectype='QSO', templatetype='QSO')
 
         return flux, self.wave, targets, truth, objtruth
 
-    def select_targets(self, targets, truth, **kwargs):
+    def select_targets(self, targets, truth, targetname='QSO'):
         """Select QSO targets.  Input tables are modified in place.
 
         Parameters
@@ -2662,15 +3087,19 @@ class QSOMaker(SelectTargets):
             Input target catalog.
         truth : :class:`astropy.table.Table`
             Corresponding truth table.
+        targetname : :class:`str`
+            Target selection cuts to apply.
 
         """
         if self.use_simqso:
-            desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames='QSO',
+            desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames=targetname,
                                                                   qso_selection='colorcuts')
         else:
             desi_target, bgs_target, mws_target = cuts.apply_cuts(
-                targets, tcnames='QSO', qso_selection='colorcuts',
+                targets, tcnames=targetname, qso_selection='colorcuts',
                 qso_optical_cuts=True)
+
+        self.remove_north_south_bits(desi_target, bgs_target, mws_target)
 
         targets['DESI_TARGET'] |= desi_target
         targets['BGS_TARGET'] |= bgs_target
@@ -2689,7 +3118,7 @@ class LYAMaker(SelectTargets):
         Statistically include DLAs along the line of sight.
 
     """
-    wave, template_maker, GMM_nospectra = None, None, None
+    wave, template_maker = None, None
 
     def __init__(self, seed=None, use_simqso=True, balprob=0.0, add_dla=False, **kwargs):
         from desisim.templates import SIMQSO, QSO
@@ -2709,6 +3138,7 @@ class LYAMaker(SelectTargets):
 
         if self.wave is None:
             LYAMaker.wave = _default_wave()
+        self.extinction = self.mw_dust_extinction()
             
         if self.template_maker is None:
             if self.use_simqso:
@@ -2716,12 +3146,9 @@ class LYAMaker(SelectTargets):
             else:
                 LYAMaker.template_maker = QSO(wave=self.wave)
 
-        if self.GMM_nospectra is None:
-            gmmfile = resource_filename('desitarget', 'mock/data/quicksurvey_gmm_qso.fits')
-            LYAMaker.GMM_nospectra = GaussianMixtureModel.load(gmmfile)
-
     def read(self, mockfile=None, mockformat='CoLoRe', healpixels=None, nside=None,
-             nside_lya=16, zmin_lya=None, mock_density=False, **kwargs):
+             nside_lya=16, zmin_lya=None, mock_density=False, only_coords=False,
+             **kwargs):
         """Read the catalog.
 
         Parameters
@@ -2742,6 +3169,9 @@ class LYAMaker(SelectTargets):
             QSO mocks.  Defaults to None.
         mock_density : :class:`bool`, optional
             Compute the median target density in the mock.  Defaults to False.
+        only_coords : :class:`bool`, optional
+            Only read the target coordinates and some other basic info.
+            Defaults to False.
 
         Returns
         -------
@@ -2758,7 +3188,7 @@ class LYAMaker(SelectTargets):
         
         if self.mockformat == 'colore':
             self.default_mockfile = os.path.join(
-                os.getenv('DESI_ROOT'), 'mocks', 'lya_forest', 'london', 'v2.0', 'master.fits')
+                os.getenv('DESI_ROOT'), 'mocks', 'lya_forest', 'london', 'v4.0', 'master.fits')
             MockReader = ReadLyaCoLoRe()
         else:
             log.warning('Unrecognized mockformat {}!'.format(mockformat))
@@ -2770,7 +3200,8 @@ class LYAMaker(SelectTargets):
         data = MockReader.readmock(mockfile, target_name=self.objtype,
                                    healpixels=healpixels, nside=nside,
                                    nside_lya=nside_lya, zmin_lya=zmin_lya,
-                                   mock_density=mock_density)
+                                   mock_density=mock_density,
+                                   only_coords=only_coords, seed=self.seed)
 
         return data
 
@@ -2825,26 +3256,18 @@ class LYAMaker(SelectTargets):
         if no_spectra:
             flux = []
             meta, objmeta = empty_metatable(nmodel=nobj, objtype=self.objtype)
-            meta['SEED'][:] = rand.randint(2**31, size=nobj)
-            meta['REDSHIFT'][:] = data['Z'][indx]
-            self.sample_gmm_nospectra(meta, rand=rand) # noiseless photometry from pre-computed GMMs
+            self._nospectra_photometry(meta, rand, data, indx, data['TARGET_NAME'])
         else:
             # Handle north/south photometry.
             south = np.where( data['SOUTH'][indx] == True )[0]
             north = np.where( data['SOUTH'][indx] == False )[0]
-            
+
             if not self.use_simqso:
-                input_meta = empty_metatable(nmodel=nobj, objtype=self.objtype, input_meta=True)
+                input_meta = empty_metatable(nmodel=nobj, objtype='QSO', subtype='LYA', input_meta=True)
                 input_meta['SEED'][:] = rand.randint(2**31, size=nobj)
                 input_meta['REDSHIFT'][:] = data['Z'][indx]
-
-                # These magnitudes are a total hack!
-                if len(north) > 0:
-                    input_meta['MAG'][north] = rand.uniform(20, 22.5, len(north)).astype('f4')
-                    input_meta['MAGFILTER'][north] = 'BASS-r'
-                if len(south) > 0:
-                    input_meta['MAG'][south] = rand.uniform(20, 22.5, len(south)).astype('f4')
-                    input_meta['MAGFILTER'][south] = 'decam2014-r'
+                input_meta['MAG'][:] = data['MAG'][indx]
+                input_meta['MAGFILTER'][:] = data['MAGFILTER'][indx]
                                 
             # Read skewers.
             skewer_wave = None
@@ -2891,9 +3314,9 @@ class LYAMaker(SelectTargets):
                     skewer_meta[k][these] = tmp_meta[k]
 
             # Check we matched things correctly.
-            assert(np.max(np.abs(skewer_meta['Z']-data['Z'][indx]))<0.000001)
-            assert(np.max(np.abs(skewer_meta['RA']-data['RA'][indx]))<0.000001)
-            assert(np.max(np.abs(skewer_meta['DEC']-data['DEC'][indx]))<0.000001)
+            assert(np.max(np.abs(skewer_meta['Z']-data['Z'][indx])) < 0.000001)
+            assert(np.max(np.abs(skewer_meta['RA']-data['RA'][indx])) < 0.000001)
+            assert(np.max(np.abs(skewer_meta['DEC']-data['DEC'][indx])) < 0.000001)
 
             # Now generate the QSO spectra simultaneously **at full wavelength
             # resolution**.  We do this because the Lya forest will have changed
@@ -2966,12 +3389,12 @@ class LYAMaker(SelectTargets):
                     flux[ii, :] = resample_flux(self.wave, qso_wave, _flux[ii, :], extrapolate=True)
 
         targets, truth, objtruth = self.populate_targets_truth(
-                data, meta, objmeta, indx=indx, psf=True, seed=seed,
-                truespectype='QSO', templatetype='QSO', templatesubtype='LYA')
+            flux, data, meta, objmeta, indx=indx, seed=seed,
+            truespectype='QSO', templatetype='QSO', templatesubtype='LYA')
 
         return flux, self.wave, targets, truth, objtruth
 
-    def select_targets(self, targets, truth, **kwargs):
+    def select_targets(self, targets, truth, targetname='QSO'):
         """Select Lya/QSO targets.  Input tables are modified in place.
 
         Parameters
@@ -2980,10 +3403,19 @@ class LYAMaker(SelectTargets):
             Input target catalog.
         truth : :class:`astropy.table.Table`
             Corresponding truth table.
+        targetname : :class:`str`
+            Target selection cuts to apply.
 
         """
-        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames='QSO',
+        if targetname == 'LYA':
+            tcnames = 'QSO'
+        else:
+            tcnames = targetname
+            
+        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames=tcnames,
                                                               qso_selection='colorcuts')
+        
+        self.remove_north_south_bits(desi_target, bgs_target, mws_target)
         
         targets['DESI_TARGET'] |= desi_target
         targets['BGS_TARGET'] |= bgs_target
@@ -3001,10 +3433,10 @@ class LRGMaker(SelectTargets):
         velocity dispersion to targets.  Defaults to 128.
 
     """
-    wave, KDTree_north, KDTree_south, template_maker = None, None, None, None
-    GMM_LRG, GMM_nospectra = None, None
-    
-    def __init__(self, seed=None, nside_chunk=128, **kwargs):
+    wave, template_maker = None, None
+    GMM_LRG, KDTree_north, KDTree_south = None, None, None
+
+    def __init__(self, seed=None, nside_chunk=128,add_SNeIa=False, **kwargs):
         from desisim.templates import LRG
         from desiutil.sklearn import GaussianMixtureModel
 
@@ -3016,8 +3448,10 @@ class LRGMaker(SelectTargets):
 
         if self.wave is None:
             LRGMaker.wave = _default_wave()
+        self.extinction = self.mw_dust_extinction()
+
         if self.template_maker is None:
-            LRGMaker.template_maker = LRG(wave=self.wave)
+            LRGMaker.template_maker = LRG(wave=self.wave,add_SNeIa=add_SNeIa)
             
         self.meta = self.template_maker.basemeta
 
@@ -3054,10 +3488,6 @@ class LRGMaker(SelectTargets):
         if self.GMM_LRG is None:
             self.read_GMM(target='LRG')
 
-        if self.GMM_nospectra is None:
-            gmmfile = resource_filename('desitarget', 'mock/data/quicksurvey_gmm_lrg.fits')
-            LRGMaker.GMM_nospectra = GaussianMixtureModel.load(gmmfile)
-
     def read(self, mockfile=None, mockformat='gaussianfield', healpixels=None,
              nside=None, only_coords=False, mock_density=False, **kwargs):
         """Read the catalog.
@@ -3091,7 +3521,7 @@ class LRGMaker(SelectTargets):
         self.mockformat = mockformat.lower()
         if self.mockformat == 'gaussianfield':
             self.default_mockfile = os.path.join(
-                os.getenv('DESI_ROOT'), 'mocks', 'GaussianRandomField', 'v0.0.8_2LPT', 'LRG.fits')
+                os.getenv('DESI_ROOT'), 'mocks', 'DarkSky', 'v1.0.1', 'lrg_0_inpt.fits')
             MockReader = ReadGaussianField()
         else:
             log.warning('Unrecognized mockformat {}!'.format(mockformat))
@@ -3149,9 +3579,8 @@ class LRGMaker(SelectTargets):
         if no_spectra:
             flux = []
             meta, objmeta = empty_metatable(nmodel=nobj, objtype=self.objtype)
-            meta['SEED'][:] = rand.randint(2**31, size=nobj)
-            meta['REDSHIFT'][:] = data['Z'][indx]
-            self.sample_gmm_nospectra(meta, rand=rand) # noiseless photometry from pre-computed GMMs
+            # noiseless photometry from pre-computed GMMs
+            self._nospectra_photometry(meta, rand, data, indx, data['TARGET_NAME'])
         else:
             input_meta, _ = empty_metatable(nmodel=nobj, objtype=self.objtype)
             input_meta['SEED'][:] = rand.randint(2**31, size=nobj)
@@ -3180,22 +3609,32 @@ class LRGMaker(SelectTargets):
             flux = np.zeros([nobj, len(self.wave)], dtype='f4')
 
             for these, issouth in zip( (north, south), (False, True) ):
-                if len(these) > 0:
-                    flux1, _, meta1, objmeta1 = self.template_maker.make_templates(
-                        input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,
-                        nocolorcuts=True)
+                    if len(these) > 0:
+                        if self.template_maker.add_SNeIa == True:
+                            try:
+                                sne_fluxratiorange=data['sne_fluxratiorange']
+                                sne_filter=data['sne_filter']
+                            except:
+                                sne_fluxratiorange=(0.01, 1.0)
+                                sne_filter='decam2014-r'
+                            flux1, _, meta1, objmeta1, snemeta = self.template_maker.make_templates(
+                                input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,sne_fluxratiorange=sne_fluxratiorange, sne_filter=sne_filter,
+                                nocolorcuts=True)
+                        else:
+                            flux1, _, meta1, objmeta1 = self.template_maker.make_templates(
+                                input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,
+                                nocolorcuts=True)
 
                     meta[these] = meta1
                     objmeta[these] = objmeta1
                     flux[these, :] = flux1
-                    
-        targets, truth, objtruth = self.populate_targets_truth(
-            data, meta, objmeta, indx=indx, psf=False, seed=seed,
-            truespectype='GALAXY', templatetype='LRG')
 
+        targets, truth, objtruth = self.populate_targets_truth(
+            flux, data, meta, objmeta, indx=indx, seed=seed,
+            truespectype='GALAXY', templatetype='LRG')
         return flux, self.wave, targets, truth, objtruth
 
-    def select_targets(self, targets, truth, **kwargs):
+    def select_targets(self, targets, truth, targetname='LRG'):
         """Select LRG targets.  Input tables are modified in place.
 
         Parameters
@@ -3204,9 +3643,13 @@ class LRGMaker(SelectTargets):
             Input target catalog.
         truth : :class:`astropy.table.Table`
             Corresponding truth table.
+        targetname : :class:`str`
+            Target selection cuts to apply.
 
         """
-        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames='LRG')
+        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames=targetname)
+        
+        self.remove_north_south_bits(desi_target, bgs_target, mws_target)
         
         targets['DESI_TARGET'] |= desi_target
         targets['BGS_TARGET'] |= bgs_target
@@ -3224,10 +3667,10 @@ class ELGMaker(SelectTargets):
         velocity dispersion to targets.  Defaults to 128.
 
     """
-    wave, KDTree_north, KDTree_south, template_maker = None, None, None, None
-    GMM_ELG, GMM_nospectra = None, None
+    wave, template_maker = None, None
+    GMM_ELG, KDTree_north, KDTree_south = None, None, None
     
-    def __init__(self, seed=None, nside_chunk=128, **kwargs):
+    def __init__(self, seed=None, nside_chunk=128,add_SNeIa=False, **kwargs):
         from desisim.templates import ELG
         from desiutil.sklearn import GaussianMixtureModel
 
@@ -3239,8 +3682,10 @@ class ELGMaker(SelectTargets):
 
         if self.wave is None:
             ELGMaker.wave = _default_wave()
+        self.extinction = self.mw_dust_extinction()
+
         if self.template_maker is None:
-            ELGMaker.template_maker = ELG(wave=self.wave)
+            ELGMaker.template_maker = ELG(wave=self.wave,add_SNeIa=add_SNeIa)
             
         self.meta = self.template_maker.basemeta
 
@@ -3255,7 +3700,7 @@ class ELGMaker(SelectTargets):
         self.param_min_south = ( zobj.min(), gr_south.min(), rz_south.min() )
         self.param_range_north = ( np.ptp(zobj), np.ptp(gr_north), np.ptp(rz_north) )
         self.param_range_south = ( np.ptp(zobj), np.ptp(gr_south), np.ptp(rz_south) )
-        
+
         if self.KDTree_north is None:
             ELGMaker.KDTree_north = self.KDTree_build(
                 np.vstack((
@@ -3272,10 +3717,6 @@ class ELGMaker(SelectTargets):
         if self.GMM_ELG is None:
             self.read_GMM(target='ELG')
         
-        if self.GMM_nospectra is None:
-            gmmfile = resource_filename('desitarget', 'mock/data/quicksurvey_gmm_elg.fits')
-            ELGMaker.GMM_nospectra = GaussianMixtureModel.load(gmmfile)
-
     def read(self, mockfile=None, mockformat='gaussianfield', healpixels=None,
              nside=None, only_coords=False, mock_density=False, **kwargs):
         """Read the catalog.
@@ -3367,9 +3808,8 @@ class ELGMaker(SelectTargets):
         if no_spectra:
             flux = []
             meta, objmeta = empty_metatable(nmodel=nobj, objtype=self.objtype)
-            meta['SEED'][:] = rand.randint(2**31, size=nobj)
-            meta['REDSHIFT'][:] = data['Z'][indx]
-            self.sample_gmm_nospectra(meta, rand=rand) # noiseless photometry from pre-computed GMMs
+            # noiseless photometry from pre-computed GMMs
+            self._nospectra_photometry(meta, rand, data, indx, data['TARGET_NAME'])
         else:
             input_meta, _ = empty_metatable(nmodel=nobj, objtype=self.objtype)
             input_meta['SEED'][:] = rand.randint(2**31, size=nobj)
@@ -3398,21 +3838,34 @@ class ELGMaker(SelectTargets):
 
             for these, issouth in zip( (north, south), (False, True) ):
                 if len(these) > 0:
-                    flux1, _, meta1, objmeta1 = self.template_maker.make_templates(
-                        input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,
-                        nocolorcuts=True)
+                    if self.template_maker.add_SNeIa == True:
+                        try:
+                            sne_fluxratiorange=data['sne_fluxratiorange']
+                            sne_filter=data['sne_filter']
+                        except:
+                            sne_fluxratiorange=(0.01, 1.0)
+                            sne_filter='decam2014-r'
+                        flux1, _, meta1, objmeta1, snemeta = self.template_maker.make_templates(
+                            input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,sne_fluxratiorange=sne_fluxratiorange, sne_filter=sne_filter,
+                            nocolorcuts=True)
+                    else:
+                        flux1, _, meta1, objmeta1 = self.template_maker.make_templates(
+                            input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,
+                            nocolorcuts=True)
 
                     meta[these] = meta1
                     objmeta[these] = objmeta1
                     flux[these, :] = flux1
 
         targets, truth, objtruth = self.populate_targets_truth(
-            data, meta, objmeta, indx=indx, psf=False, seed=seed,
+            flux, data, meta, objmeta, indx=indx, seed=seed,
             truespectype='GALAXY', templatetype='ELG')
-
+        if self.template_maker.add_SNeIa == True:
+            from astropy.table import Table, hstack
+            truth = hstack([truth,snemeta])
         return flux, self.wave, targets, truth, objtruth
 
-    def select_targets(self, targets, truth, **kwargs):
+    def select_targets(self, targets, truth, targetname='ELG'):
         """Select ELG targets.  Input tables are modified in place.
 
         Parameters
@@ -3421,9 +3874,13 @@ class ELGMaker(SelectTargets):
             Input target catalog.
         truth : :class:`astropy.table.Table`
             Corresponding truth table.
+        targetname : :class:`str`
+            Target selection cuts to apply.
 
         """
-        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames='ELG')
+        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames=targetname)
+        
+        self.remove_north_south_bits(desi_target, bgs_target, mws_target)
         
         targets['DESI_TARGET'] |= desi_target
         targets['BGS_TARGET'] |= bgs_target
@@ -3441,13 +3898,9 @@ class BGSMaker(SelectTargets):
         velocity dispersion to targets.  Defaults to 128.
 
     """
-    wave, KDTree, template_maker = None, None, None
-    GMM_BGS, GMM_nospectra = None, None
+    wave, template_maker, GMM_BGS, KDTree = None, None, None, None
     
     def __init__(self, seed=None, nside_chunk=128,add_SNeIa=False, **kwargs):
-        from desisim.templates import BGS
-        from desiutil.sklearn import GaussianMixtureModel
-
         super(BGSMaker, self).__init__()
 
         self.seed = seed
@@ -3456,7 +3909,10 @@ class BGSMaker(SelectTargets):
 
         if self.wave is None:
             BGSMaker.wave = _default_wave()
+        self.extinction = self.mw_dust_extinction()
+
         if self.template_maker is None:
+            from desisim.templates import BGS
             BGSMaker.template_maker = BGS(wave=self.wave,add_SNeIa=add_SNeIa)
             
         self.meta = self.template_maker.basemeta
@@ -3473,10 +3929,6 @@ class BGSMaker(SelectTargets):
 
         if self.GMM_BGS is None:
             self.read_GMM(target='BGS')
-
-        if self.GMM_nospectra is None:
-            gmmfile = resource_filename('desitarget', 'mock/data/quicksurvey_gmm_bgs.fits')
-            BGSMaker.GMM_nospectra = GaussianMixtureModel.load(gmmfile)
 
     def read(self, mockfile=None, mockformat='durham_mxxl_hdf5', healpixels=None,
              nside=None, magcut=None, only_coords=False, mock_density=False, **kwargs):
@@ -3578,9 +4030,8 @@ class BGSMaker(SelectTargets):
         if no_spectra:
             flux = []
             meta, objmeta = empty_metatable(nmodel=nobj, objtype=self.objtype)
-            meta['SEED'][:] = rand.randint(2**31, size=nobj)
-            meta['REDSHIFT'][:] = data['Z'][indx]
-            self.sample_gmm_nospectra(meta, rand=rand) # noiseless photometry from pre-computed GMMs
+            # noiseless photometry from pre-computed GMMs
+            self._nospectra_photometry(meta, rand, data, indx, data['TARGET_NAME'])
         else:
             input_meta, _ = empty_metatable(nmodel=nobj, objtype=self.objtype)
             input_meta['SEED'][:] = rand.randint(2**31, size=nobj)
@@ -3595,24 +4046,19 @@ class BGSMaker(SelectTargets):
                     data['SDSS_absmag_r01'][indx],
                     data['SDSS_01gr'][indx])).T )
 
-                input_meta['MAG'][:] = data['MAG'][indx]
-                input_meta['MAGFILTER'][:] = data['MAGFILTER'][indx]
-
             elif self.mockformat == 'bgs-gama':
                 # Could conceivably use other colors here--
                 input_meta['TEMPLATEID'][:] = self.KDTree_query( np.vstack((
                     data['Z'][indx],
                     data['RMABS_01'][indx],
                     data['GR_01'][indx])).T )
-
-                input_meta['MAG'][:] = data['MAG'][indx]
-                input_meta['MAGFILTER'][:] = data['MAGFILTER'][indx]
-
+                
             elif self.mockformat == 'gaussianfield':
                 # This is not quite right, but choose a template with equal probability.
                 input_meta['TEMPLATEID'][:] = rand.choice(self.meta['TEMPLATEID'], nobj)
-                input_meta['MAG'][:] = data['MAG'][indx]
-                input_meta['MAGFILTER'][:] = data['MAGFILTER'][indx]
+                
+            input_meta['MAG'][:] = data['MAG'][indx]
+            input_meta['MAGFILTER'][:] = data['MAGFILTER'][indx]
                 
             # Build north/south spectra separately.
             south = np.where( data['SOUTH'][indx] == True )[0]
@@ -3628,7 +4074,7 @@ class BGSMaker(SelectTargets):
                             sne_fluxratiorange=data['sne_fluxratiorange']
                             sne_filter=data['sne_filter']
                         except:
-                            sne_fluxratiorange=(0.1, 1.0)
+                            sne_fluxratiorange=(0.01, 1.0)
                             sne_filter='decam2014-r'
                         flux1, _, meta1, objmeta1, snemeta = self.template_maker.make_templates(
                             input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,sne_fluxratiorange=sne_fluxratiorange, sne_filter=sne_filter,
@@ -3643,15 +4089,14 @@ class BGSMaker(SelectTargets):
                     flux[these, :] = flux1
 
         targets, truth, objtruth = self.populate_targets_truth(
-            data, meta, objmeta, indx=indx, psf=False, seed=seed,
+            flux, data, meta, objmeta, indx=indx, seed=seed,
             truespectype='GALAXY', templatetype='BGS')
-
         if self.template_maker.add_SNeIa == True:
             from astropy.table import Table, hstack
             truth = hstack([truth,snemeta])
         return flux, self.wave, targets, truth, objtruth
 
-    def select_targets(self, targets, truth, **kwargs):
+    def select_targets(self, targets, truth, targetname='BGS'):
         """Select BGS targets.  Input tables are modified in place.
 
         Parameters
@@ -3662,7 +4107,9 @@ class BGSMaker(SelectTargets):
             Corresponding truth table.
 
         """
-        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames='BGS')
+        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames=targetname)
+        
+        self.remove_north_south_bits(desi_target, bgs_target, mws_target)
         
         targets['DESI_TARGET'] |= desi_target
         targets['BGS_TARGET'] |= bgs_target
@@ -3678,7 +4125,7 @@ class STARMaker(SelectTargets):
     seed : :class:`int`, optional
         Seed for reproducibility and random number generation.
     no_spectra : :class:`bool`, optional
-        Do not initialize template photometry.  Defaults to False.
+        Initialize and cache template photometry.  Defaults to False.
 
     """
     wave, template_maker, KDTree = None, None, None
@@ -3696,6 +4143,8 @@ class STARMaker(SelectTargets):
 
         if self.wave is None:
             STARMaker.wave = _default_wave()
+        self.extinction = self.mw_dust_extinction()
+
         if self.template_maker is None:
             STARMaker.template_maker = STAR(wave=self.wave)
 
@@ -3706,27 +4155,57 @@ class STARMaker(SelectTargets):
         if no_spectra and (self.star_maggies_g_north is None or self.star_maggies_r_north is None or
             self.star_maggies_g_south is None or self.star_maggies_r_south is None):
             log.info('Caching stellar template photometry.')
-            
-            flux, wave = self.template_maker.baseflux, self.template_maker.basewave
 
-            maggies_north = self.bassmzlswise.get_ab_maggies(flux, wave, mask_invalid=True)
-            maggies_south = self.decamwise.get_ab_maggies(flux, wave, mask_invalid=True)
+            if 'SYNTH_SDSS2010_R' in self.meta.colnames: # from DESI-COLORS HDU (basis templates >=v3.1)
 
-            # Normalize to both sdss-g and sdss-r
-            sdssg = filters.load_filters('sdss2010-g')
-            sdssr = filters.load_filters('sdss2010-r')
+                # Get the WISE colors from the SDSS r minus W1, W2 precomputed colors
+                maggies_north = self.meta[['SYNTH_BASS_G', 'SYNTH_BASS_R', 'SYNTH_MZLS_Z']]
+                maggies_south = self.meta[['SYNTH_DECAM2014_G', 'SYNTH_DECAM2014_R', 'SYNTH_DECAM2014_Z']]
 
-            def _get_maggies(flux, wave, outmaggies, normfilter):
-                normmaggies = normfilter.get_ab_maggies(flux, wave, mask_invalid=True)
-                for filt, flux in zip( outmaggies.colnames, ('FLUX_G', 'FLUX_R', 'FLUX_Z', 'FLUX_W1', 'FLUX_W2') ):
-                    outmaggies[filt] /= normmaggies[normfilter.names[0]]
-                    outmaggies.rename_column(filt, flux)
-                return outmaggies
+                maggies_north['SYNTH_WISE2010_W1'] = self.meta['SYNTH_SDSS2010_R'] * 10**(-0.4 * self.meta['W1-R'].data)
+                maggies_south['SYNTH_WISE2010_W1'] = self.meta['SYNTH_SDSS2010_R'] * 10**(-0.4 * self.meta['W1-R'].data)
+                maggies_north['SYNTH_WISE2010_W2'] = self.meta['SYNTH_SDSS2010_R'] * 10**(-0.4 * self.meta['W2-R'].data)
+                maggies_south['SYNTH_WISE2010_W2'] = self.meta['SYNTH_SDSS2010_R'] * 10**(-0.4 * self.meta['W2-R'].data)
 
-            STARMaker.star_maggies_g_north = _get_maggies(flux, wave, maggies_north.copy(), sdssg)
-            STARMaker.star_maggies_r_north = _get_maggies(flux, wave, maggies_north.copy(), sdssr)
-            STARMaker.star_maggies_g_south = _get_maggies(flux, wave, maggies_south.copy(), sdssg)
-            STARMaker.star_maggies_r_south = _get_maggies(flux, wave, maggies_south.copy(), sdssr)
+                # Normalize to both sdss-g and sdss-r
+                def _get_maggies(outmaggies, normmaggies):
+                    for filt, flux in zip( outmaggies.colnames, ('FLUX_G', 'FLUX_R', 'FLUX_Z', 'FLUX_W1', 'FLUX_W2') ):
+                        outmaggies[filt] /= normmaggies
+                        outmaggies.rename_column(filt, flux)
+                    return outmaggies
+
+                STARMaker.star_maggies_g_north = _get_maggies(maggies_north.copy(), self.meta['SYNTH_SDSS2010_G'])
+                STARMaker.star_maggies_r_north = _get_maggies(maggies_north.copy(), self.meta['SYNTH_SDSS2010_R'])
+                STARMaker.star_maggies_g_south = _get_maggies(maggies_south.copy(), self.meta['SYNTH_SDSS2010_G'])
+                STARMaker.star_maggies_r_south = _get_maggies(maggies_south.copy(), self.meta['SYNTH_SDSS2010_R'])
+            else:
+                sdssg = filters.load_filters('sdss2010-g')
+                sdssr = filters.load_filters('sdss2010-r')
+
+                flux, wave = self.template_maker.baseflux, self.template_maker.basewave
+                padflux, padwave = sdssr.pad_spectrum(flux, wave, method='edge')
+
+                maggies_north = self.bassmzlswise.get_ab_maggies(padflux, padwave, mask_invalid=True)
+                maggies_south = self.decamwise.get_ab_maggies(padflux, padwave, mask_invalid=True)
+                if 'W1-R' in self.meta.colnames: # >v3.0 templates
+                    sdssrnorm = sdssr.get_ab_maggies(padflux, padwave)['sdss2010-r'].data
+                    maggies_north['wise2010-W1'] = sdssrnorm * 10**(-0.4 * self.meta['W1-R'].data)
+                    maggies_south['wise2010-W1'] = sdssrnorm * 10**(-0.4 * self.meta['W1-R'].data)
+                    maggies_north['wise2010-W2'] = sdssrnorm * 10**(-0.4 * self.meta['W2-R'].data)
+                    maggies_south['wise2010-W2'] = sdssrnorm * 10**(-0.4 * self.meta['W2-R'].data)
+
+                # Normalize to both sdss-g and sdss-r
+                def _get_maggies(flux, wave, outmaggies, normfilter):
+                    normmaggies = normfilter.get_ab_maggies(flux, wave, mask_invalid=True)
+                    for filt, flux in zip( outmaggies.colnames, ('FLUX_G', 'FLUX_R', 'FLUX_Z', 'FLUX_W1', 'FLUX_W2') ):
+                        outmaggies[filt] /= normmaggies[normfilter.names[0]]
+                        outmaggies.rename_column(filt, flux)
+                    return outmaggies
+
+                STARMaker.star_maggies_g_north = _get_maggies(flux, wave, maggies_north.copy(), sdssg)
+                STARMaker.star_maggies_r_north = _get_maggies(flux, wave, maggies_north.copy(), sdssr)
+                STARMaker.star_maggies_g_south = _get_maggies(flux, wave, maggies_south.copy(), sdssg)
+                STARMaker.star_maggies_r_south = _get_maggies(flux, wave, maggies_south.copy(), sdssr)
 
         # Build the KD Tree.
         logteff = np.log10(self.meta['TEFF'].data)
@@ -3796,57 +4275,6 @@ class STARMaker(SelectTargets):
 
         return meta, objmeta
  
-    def select_contaminants(self, targets, truth):
-        """Select stellar (faint and bright) contaminants for the extragalactic targets.
-        Input tables are modified in place.
-
-        Parameters
-        ----------
-        targets : :class:`astropy.table.Table`
-            Input target catalog.
-        truth : :class:`astropy.table.Table`
-            Corresponding truth table.
-
-        """ 
-        from desitarget.cuts import isBGS_faint, isELG, isLRG_colors, isQSO_colors
-
-        gflux, rflux, zflux, w1flux, w2flux = self.deredden(targets)
-
-        # Select stellar contaminants for BGS_FAINT targets.
-        bgs_faint = isBGS_faint(rflux=rflux)
-        targets['BGS_TARGET'] |= (bgs_faint != 0) * self.bgs_mask.BGS_FAINT
-        targets['BGS_TARGET'] |= (bgs_faint != 0) * self.bgs_mask.BGS_FAINT_SOUTH
-        targets['DESI_TARGET'] |= (bgs_faint != 0) * self.desi_mask.BGS_ANY
-        
-        truth['CONTAM_TARGET'] |= (bgs_faint != 0) * self.contam_mask.BGS_IS_STAR
-        truth['CONTAM_TARGET'] |= (bgs_faint != 0) * self.contam_mask.BGS_CONTAM
-
-        # Select stellar contaminants for ELG targets.
-        elg = isELG(gflux=gflux, rflux=rflux, zflux=zflux)
-        targets['DESI_TARGET'] |= (elg != 0) * self.desi_mask.ELG
-        targets['DESI_TARGET'] |= (elg != 0) * self.desi_mask.ELG_SOUTH
-        
-        truth['CONTAM_TARGET'] |= (elg != 0) * self.contam_mask.ELG_IS_STAR
-        truth['CONTAM_TARGET'] |= (elg != 0) * self.contam_mask.ELG_CONTAM
-
-        # Select stellar contaminants for LRG targets.
-        lrg = isLRG_colors(gflux=gflux, rflux=rflux, zflux=zflux,
-                           w1flux=w1flux, w2flux=w2flux)
-        targets['DESI_TARGET'] |= (lrg != 0) * self.desi_mask.LRG
-        targets['DESI_TARGET'] |= (lrg != 0) * self.desi_mask.LRG_SOUTH
-
-        truth['CONTAM_TARGET'] |= (lrg != 0) * self.contam_mask.LRG_IS_STAR
-        truth['CONTAM_TARGET'] |= (lrg != 0) * self.contam_mask.LRG_CONTAM
-
-        # Select stellar contaminants for QSO targets.
-        qso = isQSO_colors(gflux=gflux, rflux=rflux, zflux=zflux, w1flux=w1flux, 
-                           w2flux=w2flux)
-        targets['DESI_TARGET'] |= (qso != 0) * self.desi_mask.QSO
-        targets['DESI_TARGET'] |= (qso != 0) * self.desi_mask.QSO_SOUTH
-
-        truth['CONTAM_TARGET'] |= (qso != 0) * self.contam_mask.QSO_IS_STAR
-        truth['CONTAM_TARGET'] |= (qso != 0) * self.contam_mask.QSO_CONTAM
-
 class MWS_MAINMaker(STARMaker):
     """Read MWS_MAIN mocks, generate spectra, and select targets.
 
@@ -3858,16 +4286,18 @@ class MWS_MAINMaker(STARMaker):
         Use MWS_MAIN stars as calibration (standard star) targets, only.
         Defaults to False.
     no_spectra : :class:`bool`, optional
-        Do not initialize template photometry.  Defaults to False.
+        Initialize and cache template photometry.  Defaults to False.
 
     """
     def __init__(self, seed=None, calib_only=False, no_spectra=False, **kwargs):
         super(MWS_MAINMaker, self).__init__(seed=seed, no_spectra=no_spectra)
 
+        self.seed = seed
         self.calib_only = calib_only
 
     def read(self, mockfile=None, mockformat='galaxia', healpixels=None,
-             nside=None, nside_galaxia=8, magcut=None, **kwargs):
+             nside=None, nside_galaxia=8, target_name='MWS_MAIN', magcut=None,
+             faintstar_mockfile=None, faintstar_magcut=None, **kwargs):
         """Read the catalog.
 
         Parameters
@@ -3883,6 +4313,17 @@ class MWS_MAINMaker(STARMaker):
         nside_galaxia : :class:`int`
             Healpixel nside indicating how the mock on-disk has been organized.
             Defaults to 8.
+        target_name : :class:`str`
+            Name of the target being read.  Defaults to 'MWS_MAIN'.
+        magcut : :class:`float`
+            Magnitude cut (hard-coded to SDSS r-band) to subselect targets
+            brighter than magcut.
+        faintstar_mockfile : :class:`str`, optional
+            Full path to the top-level directory of the Galaxia faint star mock
+            catalog.
+        faintstar_magcut : :class:`float`, optional
+            Magnitude cut (hard-coded to SDSS r-band) to subselect faint star
+            targets brighter than magcut.
 
         Returns
         -------
@@ -3907,9 +4348,12 @@ class MWS_MAINMaker(STARMaker):
         if mockfile is None:
             mockfile = self.default_mockfile
             
-        data = MockReader.readmock(mockfile, target_name='MWS_MAIN',
+        data = MockReader.readmock(mockfile, target_name=target_name,
                                    healpixels=healpixels, nside=nside,
-                                   nside_galaxia=nside_galaxia, magcut=magcut)
+                                   nside_galaxia=nside_galaxia, magcut=magcut,
+                                   faintstar_mockfile=faintstar_mockfile,
+                                   faintstar_magcut=faintstar_magcut,
+                                   seed=self.seed)
 
         return data
     
@@ -3984,12 +4428,12 @@ class MWS_MAINMaker(STARMaker):
                     flux[these, :] = flux1
 
         targets, truth, objtruth = self.populate_targets_truth(
-            data, meta, objmeta, indx=indx, psf=True, seed=seed,
-            truespectype='STAR', templatetype='STAR')
-                                                           
+            flux, data, meta, objmeta, indx=indx, 
+            seed=seed, truespectype='STAR', templatetype='STAR')
+        
         return flux, self.wave, targets, truth, objtruth
 
-    def select_targets(self, targets, truth):
+    def select_targets(self, targets, truth, targetname='MWS_MAIN'):
         """Select various MWS stars and standard stars.  Input tables are modified in
         place.
 
@@ -3999,237 +4443,44 @@ class MWS_MAINMaker(STARMaker):
             Input target catalog.
         truth : :class:`astropy.table.Table`
             Corresponding truth table.
+        targetname : :class:`str`
+            Target selection cuts to apply.
 
         """
-        if self.calib_only:
-            tcnames = 'STD'
+        if targetname == 'MWS_MAIN':
+            if self.calib_only:
+                tcnames = 'STD'
+            else:
+                tcnames = ['MWS', 'STD']
         else:
-            tcnames = ['MWS', 'STD']
-            
-        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames=tcnames)
+            tcnames = targetname
+
+        # Note: We pass qso_selection to cuts.apply_cuts because MWS_MAIN
+        # targets can be used as QSO contaminants.
+        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames=tcnames,
+                                                              qso_selection='colorcuts')
 
         # Subtract out the MWS_NEARBY and MWS_WD/STD_WD targeting bits, since
         # those are handled in the MWS_NEARBYMaker and WDMaker classes,
         # respectively.
-        for mwsbit in ('MWS_NEARBY', 'MWS_WD'):
-            these = mws_target & self.mws_mask.mask(mwsbit) != 0
-            if np.sum(these) > 0:
-                mws_target[these] -= self.mws_mask.mask(mwsbit)
-                andthose = mws_target[these] == 0
-                if np.sum(andthose) > 0:
-                    desi_target[these][andthose] -= self.desi_mask.mask('MWS_ANY')
+        for mwsbit in self.mws_mask.names():
+            if 'NEARBY' in mwsbit or 'WD' in mwsbit:
+                these = mws_target & self.mws_mask.mask(mwsbit) != 0
+                if np.sum(these) > 0:
+                    mws_target[these] -= self.mws_mask.mask(mwsbit)
+                    andthose = mws_target[these] == 0
+                    if np.sum(andthose) > 0:
+                        desi_target[these][andthose] -= self.desi_mask.mask('MWS_ANY')
         
         these = desi_target & self.desi_mask.mask('STD_WD') != 0
         if np.sum(these) > 0:
             desi_target[these] -= self.desi_mask.mask('STD_WD')
-            
-        targets['DESI_TARGET'] |= targets['DESI_TARGET'] | desi_target
-        targets['BGS_TARGET'] |= targets['BGS_TARGET'] | bgs_target
-        targets['MWS_TARGET'] |= targets['MWS_TARGET'] | mws_target
 
-        # Select bright stellar contaminants for the extragalactic targets.
-        log.debug('Temporarily turning off contaminants.')
-        if False:
-            self.select_contaminants(targets, truth)
-
-class FAINTSTARMaker(STARMaker):
-    """Read FAINTSTAR mocks, generate spectra, and select targets.
-
-    Parameters
-    ----------
-    seed : :class:`int`, optional
-        Seed for reproducibility and random number generation.
-    calib_only : :class:`bool`, optional
-        Use FAINTSTAR stars as calibration (standard star) targets and
-        contaminants, only.  Defaults to True.
-    no_spectra : :class:`bool`, optional
-        Do not initialize template photometry.  Defaults to False.
-
-    """
-    def __init__(self, seed=None, calib_only=True, no_spectra=False, **kwargs):
-        super(FAINTSTARMaker, self).__init__(seed=seed, no_spectra=no_spectra)
-
-    def read(self, mockfile=None, mockformat='galaxia', healpixels=None,
-             nside=None, nside_galaxia=8, magcut=None, **kwargs):
-        """Read the catalog.
-
-        Parameters
-        ----------
-        mockfile : :class:`str`
-            Full path to the mock catalog to read.
-        mockformat : :class:`str`
-            Mock catalog format.  Defaults to 'galaxia'.
-        healpixels : :class:`int`
-            Healpixel number to read.
-        nside : :class:`int`
-            Healpixel nside corresponding to healpixels.
-        nside_galaxia : :class:`int`
-            Healpixel nside indicating how the mock on-disk has been organized.
-            Defaults to 8.
-
-        Returns
-        -------
-        :class:`dict`
-            Dictionary of target properties with various keys (to be documented). 
-
-        Raises
-        ------
-        ValueError
-            If mockformat is not recognized.
-
-        """
-        self.mockformat = mockformat.lower()
-        if self.mockformat == 'galaxia':
-            self.default_mockfile = os.path.join(
-                os.getenv('DESI_ROOT'), 'mocks', 'mws', 'galaxia', 'alpha', '0.0.5_superfaint', 'healpix')
-            MockReader = ReadGalaxia()
-        else:
-            log.warning('Unrecognized mockformat {}!'.format(mockformat))
-            raise ValueError
-
-        if mockfile is None:
-            mockfile = self.default_mockfile
-            
-        data = MockReader.readmock(mockfile, target_name='FAINTSTAR',
-                                   healpixels=healpixels, nside=nside,
-                                   nside_galaxia=nside_galaxia, magcut=magcut)
-
-        return data
-    
-    def make_spectra(self, data=None, indx=None, seed=None, no_spectra=False):
-        """Generate FAINTSTAR stellar spectra.
-
-        Note: These (numerous!) objects are only used as contaminants, so we use
-        the templates themselves for the spectra rather than generating them
-        on-the-fly.
-
-        Parameters
-        ----------
-        data : :class:`dict`
-            Dictionary of source properties.
-        indx : :class:`numpy.ndarray`, optional
-            Generate spectra for a subset of the objects in the data dictionary,
-            as specified using their zero-indexed indices.
-        seed : :class:`int`, optional
-            Seed for reproducibility and random number generation.
-        no_spectra : :class:`bool`, optional
-            Do not generate spectra.  Defaults to False.
-
-        Returns
-        -------
-        flux : :class:`numpy.ndarray`
-            Target spectra.
-        wave : :class:`numpy.ndarray`
-            Corresponding wavelength array.
-        meta : :class:`astropy.table.Table`
-            Spectral metadata table.
-        targets : :class:`astropy.table.Table`
-            Target catalog.
-        truth : :class:`astropy.table.Table`
-            Corresponding truth table.
-        objtruth : :class:`astropy.table.Table`
-            Corresponding objtype-specific truth table (if applicable).
-
-        """
-        if indx is None:
-            indx = np.arange(len(data['RA']))
-        nobj = len(indx)
-
-        if seed is None:
-            seed = self.seed
-        rand = np.random.RandomState(seed)
-
-        objseeds = rand.randint(2**31, size=nobj)
-
-        if self.mockformat == 'galaxia':
-            templateid = self.KDTree_query(
-                np.vstack((np.log10(data['TEFF'][indx]),
-                           data['LOGG'][indx],
-                           data['FEH'][indx])).T)
-
-        # Initialize dummy targets and truth tables.
-        _targets = empty_targets_table(nobj)
-        _truth = empty_truth_table(nobj)
+        self.remove_north_south_bits(desi_target, bgs_target, mws_target)
         
-        # Pack the noiseless stellar photometry in the truth table, generate
-        # noisy photometry, and then select targets.
-        normmag = 1e9 * 10**(-0.4 * data['MAG'][indx]) # nanomaggies
-
-        if data['MAGFILTER'][0] == 'sdss2010-r':
-            star_maggies = self.star_maggies_r
-        elif data['MAGFILTER'][0] == 'sdss2010-g':
-            star_maggies = self.star_maggies_g
-        else:
-            log.warning('Unrecognized normalization filter!')
-            raise ValueError
-        
-        for key in ('FLUX_G', 'FLUX_R', 'FLUX_Z', 'FLUX_W1', 'FLUX_W2'):
-            _truth[key][:] = star_maggies[key][templateid] * normmag
-
-        for band in ('G', 'R', 'Z', 'W1', 'W2'):
-            for prefix in ('MW_TRANSMISSION', 'PSFDEPTH'):
-                key = '{}_{}'.format(prefix, band)
-                _targets[key][:] = data[key][indx]
-
-        self.scatter_photometry(data, _truth, _targets, indx=indx, psf=True, qaplot=False)
-
-        self.select_targets(_targets, _truth)
-
-        keep = np.where(_targets['DESI_TARGET'] != 0)[0]
-        log.debug('Pre-selected {} FAINTSTAR targets.'.format(len(keep)))
-
-        if len(keep) > 0:
-            input_meta, objmeta = empty_metatable(nmodel=len(keep), objtype=self.objtype)
-            input_meta['SEED'][:] = objseeds[keep]
-            input_meta['REDSHIFT'][:] = data['Z'][indx][keep]
-            input_meta['MAG'][:] = data['MAG'][indx][keep]
-            
-            objmeta['TEFF'][:] = data['TEFF'][indx][keep]
-            objmeta['LOGG'][:] = data['LOGG'][indx][keep]
-            objmeta['FEH'][:] = data['FEH'][indx][keep]
-
-            if no_spectra:
-                flux = []
-                meta = input_meta
-                targets, truth = self.populate_targets_truth(
-                    data, meta, objmeta, indx=indx[keep], psf=True,
-                    seed=seed, truespectype='STAR', templatetype='STAR')
-            else:
-                input_meta['TEMPLATEID'][:] = templateid[keep]
-
-                # Note! No colorcuts.
-                flux, _, meta, objmeta = self.template_maker.make_templates(input_meta=input_meta)
-
-                # Force consistency in the noisy photometry so we select the same targets. 
-                targets, truth, objtruth = self.populate_targets_truth(
-                    data, meta, objmeta, indx=indx[keep], psf=True,
-                    seed=seed, truespectype='STAR', templatetype='STAR')
-                
-                for filt in ('FLUX_G', 'FLUX_R', 'FLUX_Z', 'FLUX_W1', 'FLUX_W2'):
-                    targets[filt][:] = _targets[filt][keep]
-
-            self.select_targets(targets, truth)
-
-            return flux, self.wave, targets, truth, objtruth
-
-        else:
-            return [], self.wave, None, [], [], []
-                                                           
-    def select_targets(self, targets, truth):
-        """Select faint stellar contaminants for the extragalactic targets.  Input
-        tables are modified in place.
-
-        Parameters
-        ----------
-        targets : :class:`astropy.table.Table`
-            Input target catalog.
-        truth : :class:`astropy.table.Table`
-            Corresponding truth table.
-
-        """
-        log.info('Temporarily turning off contaminants.')
-        if False:
-            self.select_contaminants(targets, truth)
+        targets['DESI_TARGET'] |= desi_target
+        targets['BGS_TARGET'] |= bgs_target
+        targets['MWS_TARGET'] |= mws_target
 
 class MWS_NEARBYMaker(STARMaker):
     """Read MWS_NEARBY mocks, generate spectra, and select targets.
@@ -4276,7 +4527,7 @@ class MWS_NEARBYMaker(STARMaker):
         self.mockformat = mockformat.lower()
         if self.mockformat == 'mws_100pc':
             self.default_mockfile = os.path.join(
-                os.getenv('DESI_ROOT'), 'mocks', 'mws', '100pc', 'v0.0.3', 'mock_100pc.fits')
+                os.getenv('DESI_ROOT'), 'mocks', 'mws', '100pc', 'v0.0.4', 'mock_100pc.fits')
             MockReader = ReadMWS_NEARBY()
         else:
             log.warning('Unrecognized mockformat {}!'.format(mockformat))
@@ -4362,13 +4613,13 @@ class MWS_NEARBYMaker(STARMaker):
                     flux[these, :] = flux1
 
         targets, truth, objtruth = self.populate_targets_truth(
-            data, meta, objmeta, indx=indx, psf=True, seed=seed,
-            truespectype='STAR', templatetype='STAR',
+            flux, data, meta, objmeta, indx=indx, 
+            seed=seed, truespectype='STAR', templatetype='STAR',
             templatesubtype=data['TEMPLATESUBTYPE'][indx])
 
         return flux, self.wave, targets, truth, objtruth
 
-    def select_targets(self, targets, truth, **kwargs):
+    def select_targets(self, targets, truth, targetname='MWS'):
         """Select MWS_NEARBY targets.  Input tables are modified in place.
 
         Note: The selection here eventually will be done with Gaia (I think) so
@@ -4380,21 +4631,30 @@ class MWS_NEARBYMaker(STARMaker):
             Input target catalog.
         truth : :class:`astropy.table.Table`
             Corresponding truth table.
+        targetname : :class:`str`
+            Target selection cuts to apply.
 
         """
-        if False:
-            desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames=['MWS'])
-        else:
-            log.debug('Applying ad hoc selection of MWS_NEARBY targets (no Gaia in mocks).')
+        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames=targetname)
 
-            mws_nearby = np.ones(len(targets)) # select everything!
-            #mws_nearby = (truth['MAG'] <= 20.0) * 1 # SDSS g-band!
-
-            desi_target = (mws_nearby != 0) * self.desi_mask.MWS_ANY
-            mws_target = (mws_nearby != 0) * self.mws_mask.mask('MWS_NEARBY')
-
-            targets['DESI_TARGET'] |= desi_target
-            targets['MWS_TARGET'] |= mws_target
+        # Subtract out *all* the MWS targeting bits except MWS_NEARBY since
+        # those are separately handled in the MWS_MAINMaker and WDMaker classes.
+        for mwsbit in self.mws_mask.names():
+            if mwsbit == 'MWS_NEARBY':
+                pass
+            else:
+                these = mws_target & self.mws_mask.mask(mwsbit) != 0
+                if np.sum(these) > 0:
+                    mws_target[these] -= self.mws_mask.mask(mwsbit)
+                    andthose = mws_target[these] == 0
+                    if np.sum(andthose) > 0:
+                        desi_target[these][andthose] -= self.desi_mask.mask('MWS_ANY')
+        
+        self.remove_north_south_bits(desi_target, bgs_target, mws_target)
+        
+        targets['DESI_TARGET'] |= desi_target
+        targets['BGS_TARGET'] |= bgs_target
+        targets['MWS_TARGET'] |= mws_target
 
 class WDMaker(SelectTargets):
     """Read WD mocks, generate spectra, and select targets.
@@ -4426,6 +4686,7 @@ class WDMaker(SelectTargets):
 
         if self.wave is None:
             WDMaker.wave = _default_wave()
+        self.extinction = self.mw_dust_extinction()
             
         if self.da_template_maker is None:
             WDMaker.da_template_maker = WD(wave=self.wave, subtype='DA')
@@ -4442,27 +4703,49 @@ class WDMaker(SelectTargets):
             self.wd_maggies_db_north is None or self.wd_maggies_db_south is None):
             log.info('Caching WD template photometry.')
 
-            wave = self.da_template_maker.basewave
-            flux_da, flux_db = self.da_template_maker.baseflux, self.db_template_maker.baseflux
+            if 'SYNTH_SDSS2010_G' in self.meta_da.colnames: # from DESI-COLORS HDU (basis templates >=v3.1)
+                maggies_da_north = self.meta_da[['SYNTH_BASS_G', 'SYNTH_BASS_R', 'SYNTH_MZLS_Z',
+                                                 'SYNTH_WISE2010_W1', 'SYNTH_WISE2010_W2']]
+                maggies_db_north = self.meta_db[['SYNTH_BASS_G', 'SYNTH_BASS_R', 'SYNTH_MZLS_Z',
+                                                 'SYNTH_WISE2010_W1', 'SYNTH_WISE2010_W2']]
+                maggies_da_south = self.meta_da[['SYNTH_DECAM2014_G', 'SYNTH_DECAM2014_R', 'SYNTH_DECAM2014_Z',
+                                                 'SYNTH_WISE2010_W1', 'SYNTH_WISE2010_W2']]
+                maggies_db_south = self.meta_db[['SYNTH_DECAM2014_G', 'SYNTH_DECAM2014_R', 'SYNTH_DECAM2014_Z',
+                                                 'SYNTH_WISE2010_W1', 'SYNTH_WISE2010_W2']]
 
-            maggies_da_north = self.decamwise.get_ab_maggies(flux_da, wave, mask_invalid=True)
-            maggies_db_north = self.decamwise.get_ab_maggies(flux_db, wave, mask_invalid=True)
-            maggies_da_south = self.bassmzlswise.get_ab_maggies(flux_da, wave, mask_invalid=True)
-            maggies_db_south = self.bassmzlswise.get_ab_maggies(flux_db, wave, mask_invalid=True)
+                # Normalize to sdss-g
+                def _get_maggies(outmaggies, normmaggies):
+                    for filt, flux in zip( outmaggies.colnames, ('FLUX_G', 'FLUX_R', 'FLUX_Z', 'FLUX_W1', 'FLUX_W2') ):
+                        outmaggies[filt] /= normmaggies
+                        outmaggies.rename_column(filt, flux)
+                    return outmaggies
+                    
+                WDMaker.wd_maggies_da_north = _get_maggies(maggies_da_north.copy(), self.meta_da['SYNTH_SDSS2010_G'])
+                WDMaker.wd_maggies_da_south = _get_maggies(maggies_da_south.copy(), self.meta_da['SYNTH_SDSS2010_G'])
+                WDMaker.wd_maggies_db_north = _get_maggies(maggies_db_north.copy(), self.meta_db['SYNTH_SDSS2010_G'])
+                WDMaker.wd_maggies_db_south = _get_maggies(maggies_db_south.copy(), self.meta_db['SYNTH_SDSS2010_G'])
+            else:
+                wave = self.da_template_maker.basewave
+                flux_da, flux_db = self.da_template_maker.baseflux, self.db_template_maker.baseflux
 
-            # Normalize to sdss-g
-            normfilter = filters.load_filters('sdss2010-g')
-            def _get_maggies(flux, wave, outmaggies, normfilter):
-                normmaggies = normfilter.get_ab_maggies(flux, wave, mask_invalid=True)
-                for filt, flux in zip( outmaggies.colnames, ('FLUX_G', 'FLUX_R', 'FLUX_Z', 'FLUX_W1', 'FLUX_W2') ):
-                    outmaggies[filt] /= normmaggies[normfilter.names[0]]
-                    outmaggies.rename_column(filt, flux)
-                return outmaggies
+                maggies_da_north = self.bassmzlswise.get_ab_maggies(flux_da, wave, mask_invalid=True)
+                maggies_db_north = self.bassmzlswise.get_ab_maggies(flux_db, wave, mask_invalid=True)
+                maggies_da_south = self.decamwise.get_ab_maggies(flux_da, wave, mask_invalid=True)
+                maggies_db_south = self.decamwise.get_ab_maggies(flux_db, wave, mask_invalid=True)
 
-            WDMaker.wd_maggies_da_north = _get_maggies(flux_da, wave, maggies_da_north.copy(), normfilter)
-            WDMaker.wd_maggies_da_south = _get_maggies(flux_da, wave, maggies_da_south.copy(), normfilter)
-            WDMaker.wd_maggies_db_north = _get_maggies(flux_db, wave, maggies_db_north.copy(), normfilter)
-            WDMaker.wd_maggies_db_south = _get_maggies(flux_db, wave, maggies_db_south.copy(), normfilter)
+                # Normalize to sdss-g
+                normfilter = filters.load_filters('sdss2010-g')
+                def _get_maggies(flux, wave, outmaggies, normfilter):
+                    normmaggies = normfilter.get_ab_maggies(flux, wave, mask_invalid=True)
+                    for filt, flux in zip( outmaggies.colnames, ('FLUX_G', 'FLUX_R', 'FLUX_Z', 'FLUX_W1', 'FLUX_W2') ):
+                        outmaggies[filt] /= normmaggies[normfilter.names[0]]
+                        outmaggies.rename_column(filt, flux)
+                    return outmaggies
+
+                WDMaker.wd_maggies_da_north = _get_maggies(flux_da, wave, maggies_da_north.copy(), normfilter)
+                WDMaker.wd_maggies_da_south = _get_maggies(flux_da, wave, maggies_da_south.copy(), normfilter)
+                WDMaker.wd_maggies_db_north = _get_maggies(flux_db, wave, maggies_db_north.copy(), normfilter)
+                WDMaker.wd_maggies_db_south = _get_maggies(flux_db, wave, maggies_db_south.copy(), normfilter)
 
         # Build the KD Trees
         logteff_da = np.log10(self.meta_da['TEFF'].data)
@@ -4649,26 +4932,26 @@ class WDMaker(SelectTargets):
                                 meta1, objmeta1 = self.wd_template_photometry(
                                     data, indx[match][these], rand, subtype,
                                     south=issouth)
-                                meta[match][these] = meta1
-                                objmeta[match][these] = objmeta1
+                                meta[match[these]] = meta1
+                                objmeta[match[these]] = objmeta1
                             else:
                                 # Note: no "nocolorcuts" argument!
                                 template_maker = getattr(self, '{}_template_maker'.format(subtype.lower()))
                                 flux1, _, meta1, objmeta1 = template_maker.make_templates(
-                                    input_meta=input_meta[match][these], south=issouth)
+                                    input_meta=input_meta[match[these]], south=issouth)
 
                                 meta[match[these]] = meta1
                                 objmeta[match[these]] = objmeta1
                                 flux[match[these], :] = flux1
 
         targets, truth, objtruth = self.populate_targets_truth(
-            data, meta, objmeta, indx=indx, psf=True, seed=seed,
-            truespectype='WD', templatetype='WD',
+            flux, data, meta, objmeta, indx=indx, 
+            seed=seed, truespectype='WD', templatetype='WD',
             templatesubtype=allsubtype)
-
+        
         return flux, self.wave, targets, truth, objtruth
 
-    def select_targets(self, targets, truth, **kwargs):
+    def select_targets(self, targets, truth, targetname='WD'):
         """Select MWS_WD targets and STD_WD standard stars.  Input tables are modified
         in place.
 
@@ -4678,15 +4961,28 @@ class WDMaker(SelectTargets):
             Input target catalog.
         truth : :class:`astropy.table.Table`
             Corresponding truth table.
+        targetname : :class:`str`
+            Target selection cuts to apply.
 
         """
-        if not self.calib_only:
-            desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames=['MWS'])
-            targets['DESI_TARGET'] |= desi_target
-            targets['MWS_TARGET'] |= mws_target
+        if targetname == 'WD':
+            if self.calib_only:
+                tcnames = 'STD'
+            else:
+                tcnames = ['MWS', 'STD']
+        else:
+            tcnames = targetname
 
-        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames=['STD'])
+        # Assume that MWS_MAIN and MWS_NEARBY objects are *never* selected from
+        # the WD mock.
+        
+        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames=tcnames)
+
+        self.remove_north_south_bits(desi_target, bgs_target, mws_target)
+        
         targets['DESI_TARGET'] |= desi_target
+        targets['BGS_TARGET'] |= bgs_target
+        targets['MWS_TARGET'] |= mws_target
 
 class SKYMaker(SelectTargets):
     """Read SKY mocks, generate spectra, and select targets.
@@ -4707,6 +5003,7 @@ class SKYMaker(SelectTargets):
 
         if self.wave is None:
             SKYMaker.wave = _default_wave()
+        self.extinction = self.mw_dust_extinction()
         
     def read(self, mockfile=None, mockformat='uniformsky', healpixels=None,
              nside=None, only_coords=False, mock_density=False, **kwargs):
@@ -4741,7 +5038,7 @@ class SKYMaker(SelectTargets):
         self.mockformat = mockformat.lower()
         if self.mockformat == 'uniformsky':
             self.default_mockfile = os.path.join(
-                os.getenv('DESI_ROOT'), 'mocks', 'uniformsky', '0.1', 'uniformsky-2048-0.1.fits')
+                os.getenv('DESI_ROOT'), 'mocks', 'uniformsky', '0.2', 'uniformsky-2048-0.2.fits')
             MockReader = ReadUniformSky()
         elif self.mockformat == 'gaussianfield':
             self.default_mockfile = os.path.join(
@@ -4761,7 +5058,7 @@ class SKYMaker(SelectTargets):
 
         return data
 
-    def make_spectra(self, data=None, indx=None, seed=None, **kwargs):
+    def make_spectra(self, data=None, indx=None, seed=None, no_spectra=False):
         """Generate SKY spectra.
 
         Parameters
@@ -4773,6 +5070,8 @@ class SKYMaker(SelectTargets):
             as specified using their zero-indexed indices.
         seed : :class:`int`, optional
             Seed for reproducibility and random number generation.
+        no_spectra : :class:`bool`, optional
+            Do not generate spectra.  Defaults to False.
 
         Returns
         -------
@@ -4798,18 +5097,22 @@ class SKYMaker(SelectTargets):
             indx = np.arange(len(data['RA']))
         nobj = len(indx)
 
+        if no_spectra:
+            flux = []
+        else:
+            flux = np.zeros((nobj, len(self.wave)), dtype='f4')
+            
         meta, objmeta = empty_metatable(nmodel=nobj, objtype=self.objtype)
         meta['SEED'][:] = rand.randint(2**31, size=nobj)
         meta['REDSHIFT'][:] = data['Z'][indx]
         
-        flux = np.zeros((nobj, len(self.wave)), dtype='i1')
         targets, truth, objtruth = self.populate_targets_truth(
-            data, meta, objmeta, indx=indx, psf=False, seed=seed,
+            flux, data, meta, objmeta, indx=indx, seed=seed,
             truespectype='SKY', templatetype='SKY')
 
         return flux, self.wave, targets, truth, objtruth
 
-    def select_targets(self, targets, truth, **kwargs):
+    def select_targets(self, targets, truth, targetname='SKY'):
         """Select SKY targets (i.e., everything).  Input tables are modified in place.
 
         Parameters
@@ -4818,6 +5121,337 @@ class SKYMaker(SelectTargets):
             Input target catalog.
         truth : :class:`astropy.table.Table`
             Corresponding truth table.
+        targetname : :class:`str`
+            Target selection cuts to apply.
 
         """
-        targets['DESI_TARGET'] |= self.desi_mask.mask('SKY')
+        targets['DESI_TARGET'] |= self.desi_mask.mask(targetname)
+
+class BuzzardMaker(SelectTargets):
+    """Read Buzzard mocks, generate spectra, and select targets.
+
+    Parameters
+    ----------
+    seed : :class:`int`, optional
+        Seed for reproducibility and random number generation.
+    no_spectra : :class:`bool`, optional
+        Do not pre-select extragalactic contaminants.  Defaults to False.
+
+    """
+    wave, template_maker = None, None
+    
+    def __init__(self, seed=None, nside_chunk=128, no_spectra=False, **kwargs):
+        super(BuzzardMaker, self).__init__()
+
+        self.seed = seed
+        self.objtype = 'BGS'
+        self.nside_chunk = nside_chunk
+
+        if self.wave is None:
+            BuzzardMaker.wave = _default_wave()
+        self.extinction = self.mw_dust_extinction()
+
+        if self.template_maker is None:
+            from desisim.templates import BGS
+            BuzzardMaker.template_maker = BGS(wave=self.wave)
+
+        # Store the metadata table and then pre-select extragalactic
+        # contaminants/templates, which will add columns to self.meta in place
+        # (unless no_spectra=True, in which case skip it).
+        self.meta = self.template_maker.basemeta
+        if not no_spectra:
+            self.extragalactic_contaminants(seed)
+
+    def extragalactic_contaminants(self, seed, nmonte=100):
+        """Pre-select Buzzard/BGS templates that could be photometric contaminants.
+
+        """
+        from astropy.table import Column
+        from desisim.io import find_basis_template
+        from desitarget.cuts import isELG_colors, isQSO_colors
+
+        rand = np.random.RandomState(seed)
+
+        # Average grzW1W2 imaging depth and scattered photometry
+        psfdepth_sigma = 10**(-0.4 * (np.array((24.65, 23.61, 22.84)) - 22.5)) / 5 # 1-sigma, nanomaggies
+        wisedepth_sigma = 10**(-0.4 * (np.array((22.3, 21.8)) - 22.5))             # 1-sigma, nanomaggies
+        depth_sigma = np.hstack( (psfdepth_sigma, wisedepth_sigma) )
+
+        gflux_err  = rand.normal(loc=0, scale=depth_sigma[0], size=nmonte)
+        rflux_err  = rand.normal(loc=0, scale=depth_sigma[1], size=nmonte)
+        zflux_err  = rand.normal(loc=0, scale=depth_sigma[2], size=nmonte)
+        w1flux_err = rand.normal(loc=0, scale=depth_sigma[3], size=nmonte)
+        w2flux_err = rand.normal(loc=0, scale=depth_sigma[4], size=nmonte)
+
+        # Unpack the metadata table.
+        templatefile = find_basis_template('BGS')
+        hdr = fitsio.read_header(templatefile, ext='DESI-COLORS')
+        zgrid = hdr['DZ'] * np.arange(hdr['NZ']) + hdr['ZMIN']
+        nz, nt = len(zgrid), len(self.meta)
+
+        bigzgrid = np.tile(zgrid, (nt, 1)).reshape(nt, nz).flatten()
+        bigtemplateid = np.tile(self.meta['TEMPLATEID'].data, (1, nz)).reshape(nz, nt).T.flatten()
+
+        # First ELGs--
+
+        # ELG contaminants will be (most likely) lower-redshift (z<0.7)
+        # interlopers, so focus on that redshift range, extract the fluxes, and
+        # scale to g=22 (to satisfy the bright cut).
+        elgzcut = bigzgrid < 0.75
+        elgscale = (10**(-0.4 * (22 - 22.5) ) / self.meta['SYNTH_DECAM2014_G'].data).flatten()[elgzcut]
+
+        gflux  = elgscale * self.meta['SYNTH_DECAM2014_G'].data.flatten()[elgzcut]
+        rflux  = elgscale * self.meta['SYNTH_DECAM2014_R'].data.flatten()[elgzcut]
+        zflux  = elgscale * self.meta['SYNTH_DECAM2014_Z'].data.flatten()[elgzcut]
+        w1flux = elgscale * self.meta['SYNTH_WISE2010_W1'].data.flatten()[elgzcut]
+        w2flux = elgscale * self.meta['SYNTH_WISE2010_W2'].data.flatten()[elgzcut]
+
+        # Monte Carlo the colors and take the union of all the templates that
+        # scatter into the ELG color-box.
+        iselg = np.zeros(len(gflux)).astype(bool)
+        for ii in range(nmonte):
+            iselg = np.logical_or( (iselg), (isELG_colors(
+                south = True,
+                gflux = gflux + gflux_err[ii],
+                rflux = rflux + rflux_err[ii],
+                zflux = zflux + zflux_err[ii],
+                w1flux= w1flux + w1flux_err[ii],
+                w2flux= w2flux + w2flux_err[ii])) )
+
+        # Determine which templates scatter into the ELG color-box **in each
+        # redshift bin.***
+        idelg  = np.digitize(bigzgrid[elgzcut][iselg], zgrid)
+        contam_elg = []
+        for ii in range(len(zgrid)):
+            these = np.where(idelg == ii)[0]
+            #print(bigzgrid[elgzcut][iselg][these], len(these))
+            contam_elg.append( bigtemplateid[elgzcut][iselg][these] )
+            
+        #these = np.unique(bigtemplateid[elgzcut][iselg])
+        #contam_elg = np.zeros(nt).astype(bool)
+        #contam_elg[these] = True
+        #self.meta.add_column(Column(name='CONTAM_ELG', data=contam_elg))
+        
+        #log.debug('Found {} / {} templates that scatter into the ELG color box with z < 0.75.'.format(len(these), nt))
+
+        # Now QSOs--
+
+        # I'm not sure what the redshift distribution of QSO contaminants will be...
+        qsozcut = bigzgrid < 2.5
+
+        gflux  = self.meta['SYNTH_DECAM2014_G'].data.flatten()[qsozcut]
+        rflux  = self.meta['SYNTH_DECAM2014_R'].data.flatten()[qsozcut]
+        zflux  = self.meta['SYNTH_DECAM2014_Z'].data.flatten()[qsozcut]
+        w1flux = self.meta['SYNTH_WISE2010_W1'].data.flatten()[qsozcut]
+        w2flux = self.meta['SYNTH_WISE2010_W2'].data.flatten()[qsozcut]
+
+        # Monte Carlo the colors and take the union of all the templates that
+        # scatter into the QSO color-box.
+        isqso = np.zeros(len(gflux)).astype(bool)
+        for ii in range(nmonte):
+            isqso = np.logical_or( (isqso), (isQSO_colors(
+                south = True, 
+                gflux = gflux + gflux_err[ii],
+                rflux = rflux + rflux_err[ii],
+                zflux = zflux + zflux_err[ii],
+                w1flux= w1flux + w1flux_err[ii],
+                w2flux= w2flux + w2flux_err[ii])) )
+
+        idqso  = np.digitize(bigzgrid[qsozcut][isqso], zgrid)
+        contam_qso = []
+        for ii in range(len(zgrid)):
+            these = np.where(idqso == ii)[0]
+            #print(bigzgrid[qsozcut][isqso][these], len(these))
+            contam_qso.append( bigtemplateid[qsozcut][isqso][these] )
+
+        # Keep the results.
+        self.contam_zgrid = zgrid
+        self.contam_elg = contam_elg
+        self.contam_qso = contam_qso
+
+    def read(self, mockfile=None, mockformat='buzzard', healpixels=None,
+             nside=None, nside_buzzard=8, target_name='', magcut=None,
+             only_coords=False, **kwargs):
+        """Read the catalog.
+
+        Parameters
+        ----------
+        mockfile : :class:`str`
+            Full path to the mock catalog to read.
+        mockformat : :class:`str`
+            Mock catalog format.  Defaults to 'buzzard'.
+        healpixels : :class:`int`
+            Healpixel number to read.
+        nside : :class:`int`
+            Healpixel nside corresponding to healpixels.
+        nside_buzzard : :class:`int`
+            Healpixel nside indicating how the mock on-disk has been organized.
+            Defaults to 8.
+        target_name : :class:`str`
+            Name of the target being read.  Defaults to ''.
+        magcut : :class:`float`
+            Magnitude cut (hard-coded to DECam r-band) to subselect targets
+            brighter than magcut. 
+        only_coords : :class:`bool`, optional
+            For various applications, only read the target coordinates.
+
+        Returns
+        -------
+        :class:`dict`
+            Dictionary of target properties with various keys (to be documented). 
+
+        Raises
+        ------
+        ValueError
+            If mockformat is not recognized.
+
+        """
+        self.mockformat = mockformat.lower()
+        if self.mockformat == 'buzzard':
+            self.default_mockfile = os.path.join(
+                os.getenv('DESI_ROOT'), 'mocks', 'buzzard', 'buzzard_v1.6_desicut')
+            MockReader = ReadBuzzard()
+        else:
+            log.warning('Unrecognized mockformat {}!'.format(mockformat))
+            raise ValueError
+
+        if mockfile is None:
+            mockfile = self.default_mockfile
+
+        data = MockReader.readmock(mockfile, target_name=target_name, 
+                                   healpixels=healpixels, nside=nside,
+                                   nside_buzzard=nside_buzzard,
+                                   only_coords=only_coords,
+                                   magcut=magcut)
+
+        return data
+
+    def make_spectra(self, data=None, indx=None, seed=None, no_spectra=False):
+        """Generate BGS spectra.
+
+        Parameters
+        ----------
+        data : :class:`dict`
+            Dictionary of source properties.
+        indx : :class:`numpy.ndarray`, optional
+            Generate spectra for a subset of the objects in the data dictionary,
+            as specified using their zero-indexed indices.
+        seed : :class:`int`, optional
+            Seed for reproducibility and random number generation.
+        no_spectra : :class:`bool`, optional
+            Do not generate spectra.  Defaults to False.
+
+        Returns
+        -------
+        flux : :class:`numpy.ndarray`
+            Target spectra.
+        wave : :class:`numpy.ndarray`
+            Corresponding wavelength array.
+        meta : :class:`astropy.table.Table`
+            Spectral metadata table.
+        targets : :class:`astropy.table.Table`
+            Target catalog.
+        truth : :class:`astropy.table.Table`
+            Corresponding truth table.
+        objtruth : :class:`astropy.table.Table`
+            Corresponding objtype-specific truth table (if applicable).
+        
+        """
+        if seed is None:
+            seed = self.seed
+        rand = np.random.RandomState(seed)
+
+        if indx is None:
+            indx = np.arange(len(data['RA']))
+        nobj = len(indx)
+
+        if no_spectra:
+            flux = []
+            meta, objmeta = empty_metatable(nmodel=nobj, objtype=self.objtype)
+            self._nospectra_photometry(meta, rand, data, indx, data['TARGET_NAME'], contaminants=True)
+        else:
+            input_meta, _ = empty_metatable(nmodel=nobj, objtype=self.objtype)
+            input_meta['SEED'][:] = rand.randint(2**31, size=nobj)
+            input_meta['REDSHIFT'][:] = data['Z'][indx]
+            
+            vdisp = self._sample_vdisp(data['RA'][indx], data['DEC'][indx], mean=1.9,
+                                       sigma=0.15, seed=seed, nside=self.nside_chunk)
+
+            input_meta['MAG'][:] = data['MAG'][indx]
+            input_meta['MAGFILTER'][:] = data['MAGFILTER'][indx]
+            
+            # Choose a template from the right redshift bin of contaminants
+            # depending on what type of contaminant we're simulating.
+            if data['TARGET_NAME'].upper() == 'QSO':
+                contamid  = np.digitize(input_meta['REDSHIFT'], self.contam_zgrid)
+                templateid = []
+                for cid in np.unique(contamid):
+                    if len(self.contam_qso[cid]) > 0:
+                        templateid.append( rand.choice(self.contam_qso[cid], np.count_nonzero(cid == contamid)) )
+                    else:
+                        # throw-away templates
+                        templateid.append( rand.choice(self.meta['TEMPLATEID'].data, np.count_nonzero(cid == contamid)) )
+                templateid = np.hstack(templateid)
+            elif data['TARGET_NAME'].upper() == 'ELG':
+                contamid  = np.digitize(input_meta['REDSHIFT'], self.contam_zgrid)
+                templateid = []
+                for cid in np.unique(contamid):
+                    if len(self.contam_elg[cid]) > 0:
+                        templateid.append( rand.choice(self.contam_elg[cid], np.count_nonzero(cid == contamid)) )
+                    else:
+                        # throw-away templates
+                        templateid.append( rand.choice(self.meta['TEMPLATEID'].data, np.count_nonzero(cid == contamid)) )
+                templateid = np.hstack(templateid)
+            else:
+                log.warning('Need to pre-select more classes of contaminants!')
+                templateid = rand.choice(self.meta['TEMPLATEID'], nobj)
+
+            input_meta['TEMPLATEID'][:] = templateid
+                
+            # Build north/south spectra separately.
+            south = np.where( data['SOUTH'][indx] == True )[0]
+            north = np.where( data['SOUTH'][indx] == False )[0]
+
+            meta, objmeta = empty_metatable(nmodel=nobj, objtype=self.objtype)
+            flux = np.zeros([nobj, len(self.wave)], dtype='f4')
+
+            for these, issouth in zip( (north, south), (False, True) ):
+                if len(these) > 0:
+                    flux1, _, meta1, objmeta1 = self.template_maker.make_templates(
+                        input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,
+                        nocolorcuts=True)
+
+                    meta[these] = meta1
+                    objmeta[these] = objmeta1
+                    flux[these, :] = flux1
+
+        targets, truth, objtruth = self.populate_targets_truth(
+            flux, data, meta, objmeta, indx=indx, seed=seed,
+            truespectype='GALAXY', templatetype='BGS')
+
+        return flux, self.wave, targets, truth, objtruth
+
+    def select_targets(self, targets, truth, targetname='BGS'):
+        """Select extragalactic contaminants.  Input tables are modified in place.
+
+        Parameters
+        ----------
+        targets : :class:`astropy.table.Table`
+            Input target catalog.
+        truth : :class:`astropy.table.Table`
+            Corresponding truth table.
+        targetname : :class:`str`
+            Target selection cuts to apply.
+
+        """
+        # There's an inconsistency here if use_simqso=False in the configuration
+        # file...we should be setting optical=True.
+        
+        desi_target, bgs_target, mws_target = cuts.apply_cuts(targets, tcnames=targetname,
+                                                              qso_selection='colorcuts')
+
+        self.remove_north_south_bits(desi_target, bgs_target, mws_target)
+        
+        targets['DESI_TARGET'] |= desi_target
+        targets['BGS_TARGET'] |= bgs_target
+        targets['MWS_TARGET'] |= mws_target
