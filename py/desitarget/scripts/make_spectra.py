@@ -31,7 +31,7 @@ parser.add_argument('--nside', default=64, type=int,
 parser.add_argument('--healpixel', default=26030, type=int,
                 help='healpixel number')
 
-parser.add_argument('--path', default='./simulation_out', type=str,
+parser.add_argument('--outpath', default='./simulation_out', type=str,
                 help='path to output')
 parser.add_argument('--fname', default='spectra.bin', type=str,
                 help='File name')
