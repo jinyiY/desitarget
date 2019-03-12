@@ -3436,7 +3436,7 @@ class LRGMaker(SelectTargets):
     wave, template_maker = None, None
     GMM_LRG, KDTree_north, KDTree_south = None, None, None
 
-    def __init__(self, seed=None, nside_chunk=128,add_SNeIa=False, **kwargs):
+    def __init__(self, seed=None, nside_chunk=128,add_SNeIa=False, add_SNeIIp=False **kwargs):
         from desisim.templates import LRG
         from desiutil.sklearn import GaussianMixtureModel
 
@@ -3451,7 +3451,7 @@ class LRGMaker(SelectTargets):
         self.extinction = self.mw_dust_extinction()
 
         if self.template_maker is None:
-            LRGMaker.template_maker = LRG(wave=self.wave,add_SNeIa=add_SNeIa)
+            LRGMaker.template_maker = LRG(wave=self.wave,add_SNeIa=add_SNeIa, add_SNeIIp=add_SNeIIp)
             
         self.meta = self.template_maker.basemeta
 
@@ -3610,7 +3610,7 @@ class LRGMaker(SelectTargets):
 
             for these, issouth in zip( (north, south), (False, True) ):
                     if len(these) > 0:
-                        if self.template_maker.add_SNeIa == True:
+                        if self.template_maker.add_SNeIa or self.template_maker.add_SNeIIp:
                             try:
                                 sne_fluxratiorange=data['sne_fluxratiorange']
                                 sne_filter=data['sne_filter']
@@ -3670,7 +3670,7 @@ class ELGMaker(SelectTargets):
     wave, template_maker = None, None
     GMM_ELG, KDTree_north, KDTree_south = None, None, None
     
-    def __init__(self, seed=None, nside_chunk=128,add_SNeIa=False, **kwargs):
+    def __init__(self, seed=None, nside_chunk=128,add_SNeIa=False, add_SNeIIp=False, **kwargs):
         from desisim.templates import ELG
         from desiutil.sklearn import GaussianMixtureModel
 
@@ -3685,7 +3685,7 @@ class ELGMaker(SelectTargets):
         self.extinction = self.mw_dust_extinction()
 
         if self.template_maker is None:
-            ELGMaker.template_maker = ELG(wave=self.wave,add_SNeIa=add_SNeIa)
+            ELGMaker.template_maker = ELG(wave=self.wave,add_SNeIa=add_SNeIa,add_SNeIIp=add_SNeIIp)
             
         self.meta = self.template_maker.basemeta
 
@@ -3838,7 +3838,7 @@ class ELGMaker(SelectTargets):
 
             for these, issouth in zip( (north, south), (False, True) ):
                 if len(these) > 0:
-                    if self.template_maker.add_SNeIa == True:
+                    if self.template_maker.add_SNeIa or self.template_maker.add_SNeIIp:
                         try:
                             sne_fluxratiorange=data['sne_fluxratiorange']
                             sne_filter=data['sne_filter']
@@ -3860,7 +3860,7 @@ class ELGMaker(SelectTargets):
         targets, truth, objtruth = self.populate_targets_truth(
             flux, data, meta, objmeta, indx=indx, seed=seed,
             truespectype='GALAXY', templatetype='ELG')
-        if self.template_maker.add_SNeIa == True:
+        if self.template_maker.add_SNeIa or self.template_maker.add_SNeIIp:
             from astropy.table import Table, hstack
             truth = hstack([truth,snemeta])
         return flux, self.wave, targets, truth, objtruth
@@ -3900,7 +3900,7 @@ class BGSMaker(SelectTargets):
     """
     wave, template_maker, GMM_BGS, KDTree = None, None, None, None
     
-    def __init__(self, seed=None, nside_chunk=128,add_SNeIa=False, **kwargs):
+    def __init__(self, seed=None, nside_chunk=128,add_SNeIa=False, add_SNeIIp=False,**kwargs):
         super(BGSMaker, self).__init__()
 
         self.seed = seed
@@ -3913,7 +3913,7 @@ class BGSMaker(SelectTargets):
 
         if self.template_maker is None:
             from desisim.templates import BGS
-            BGSMaker.template_maker = BGS(wave=self.wave,add_SNeIa=add_SNeIa)
+            BGSMaker.template_maker = BGS(wave=self.wave,add_SNeIa=add_SNeIa,add_SNeIIp=add_SNeIIp)
             
         self.meta = self.template_maker.basemeta
 
@@ -4069,7 +4069,7 @@ class BGSMaker(SelectTargets):
 
             for these, issouth in zip( (north, south), (False, True) ):
                 if len(these) > 0:
-                    if self.template_maker.add_SNeIa == True:
+                    if self.template_maker.add_SNeIa or self.template_maker.add_SNeIIp:
                         try:
                             sne_fluxratiorange=data['sne_fluxratiorange']
                             sne_filter=data['sne_filter']
@@ -4091,7 +4091,7 @@ class BGSMaker(SelectTargets):
         targets, truth, objtruth = self.populate_targets_truth(
             flux, data, meta, objmeta, indx=indx, seed=seed,
             truespectype='GALAXY', templatetype='BGS')
-        if self.template_maker.add_SNeIa == True:
+        if self.template_maker.add_SNeIa or self.template_maker.add_SNeIIp:
             from astropy.table import Table, hstack
             truth = hstack([truth,snemeta])
         return flux, self.wave, targets, truth, objtruth
