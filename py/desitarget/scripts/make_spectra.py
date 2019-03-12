@@ -126,6 +126,7 @@ def main():
         tflux, twave, ttargets, ttruth, tobjtruth = mockmaker(Maker,template_maker, seed=seed, nrand=nrand,sne_fluxratiorange=flux_ratio_range
             ,sne_filter='decam2014-r',healpixel=healpixel,nside=nside)
         templates_bgs = [tflux, twave, ttargets, ttruth, tobjtruth]
+        print('Spectra Ready. Saving to {} ....'.format(os.path.join(path, fname)))
         saved_to = save(templates_bgs,os.path.join(path, fname))
         print("Saved BGS template data to {}".format(saved_to))
     if nelg != 0:
@@ -135,8 +136,9 @@ def main():
         print('making {} ELG spectra with SN Ia {} SN IIp {}'.format(nelg, add_SNeIa, add_SNeIIp))
         tflux, twave, ttargets, ttruth, tobjtruth = mockmaker(Maker,template_maker, seed=seed, nrand=nrand,sne_fluxratiorange=flux_ratio_range
             ,sne_filter='decam2014-r',healpixel=healpixel,nside=nside)
-        templates_bgs = [tflux, twave, ttargets, ttruth, tobjtruth]
-        saved_to = save(templates_bgs,os.path.join(path,fname))
+        templates_elg = [tflux, twave, ttargets, ttruth, tobjtruth]
+        print('Spectra Ready. Saving to {} ....'.format(os.path.join(path, fname)))
+        saved_to = save(templates_elg,os.path.join(path, fname))
         print("Saved ELG template data to {}".format(saved_to))
     if nlrg != 0:
         nrand = nlrg       
@@ -145,8 +147,9 @@ def main():
         print('making {} LRG spectra with SN Ia {} SN IIp {}'.format(nlrg, add_SNeIa, add_SNeIIp))
         tflux, twave, ttargets, ttruth, tobjtruth = mockmaker(Maker,template_maker, seed=seed, nrand=nrand,sne_fluxratiorange=flux_ratio_range
             ,sne_filter='decam2014-r',healpixel=healpixel,nside=nside)
-        templates_bgs = [tflux, twave, ttargets, ttruth, tobjtruth]
-        saved_to = save(templates_bgs,os.path.join(path,fname))
+        templates_lrg = [tflux, twave, ttargets, ttruth, tobjtruth]
+        print('Spectra Ready. Saving to {} ....'.format(os.path.join(path, fname)))
+        saved_to = save(templates_lrg,os.path.join(path, fname))
         print("Saved LRG template data to {}".format(saved_to))
     # data = np.concatenate([t[0] for t in
     #                      [templates_bgs, templates_elg, templates_lrg] if len(t) != 0])
