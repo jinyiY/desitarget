@@ -121,7 +121,7 @@ def main():
     if nbgs != 0:
         nrand = nbgs        
         Maker = BGSMaker
-        template_maker = tmpl.BGS(add_SNeIa=add_SNeIa,wave=_default_wave())
+        template_maker = tmpl.BGS(add_SNeIa=add_SNeIa,add_SNeIIp=add_SNeIIp,wave=_default_wave())
         print('making {} BGS spectra with SN Ia {} SN IIp {}'.format(nbgs, add_SNeIa, add_SNeIIp))
         tflux, twave, ttargets, ttruth, tobjtruth = mockmaker(Maker,template_maker, seed=seed, nrand=nrand,sne_fluxratiorange=flux_ratio_range
             ,sne_filter='decam2014-r',healpixel=healpixel,nside=nside)
@@ -131,7 +131,7 @@ def main():
     if nelg != 0:
         nrand = nelg     
         Maker = ELGMaker
-        template_maker = tmpl.ELG(add_SNeIa=add_SNeIa,wave=_default_wave())
+        template_maker = tmpl.ELG(add_SNeIa=add_SNeIa,add_SNeIIp=add_SNeIIp,wave=_default_wave())
         print('making {} ELG spectra with SN Ia {} SN IIp {}'.format(nelg, add_SNeIa, add_SNeIIp))
         tflux, twave, ttargets, ttruth, tobjtruth = mockmaker(Maker,template_maker, seed=seed, nrand=nrand,sne_fluxratiorange=flux_ratio_range
             ,sne_filter='decam2014-r',healpixel=healpixel,nside=nside)
@@ -141,7 +141,7 @@ def main():
     if nlrg != 0:
         nrand = nlrg       
         Maker = LRGMaker
-        template_maker = tmpl.LRG(add_SNeIa=add_SNeIa,wave=_default_wave())
+        template_maker = tmpl.LRG(add_SNeIa=add_SNeIa,add_SNeIIp=add_SNeIIp,wave=_default_wave())
         print('making {} LRG spectra with SN Ia {} SN IIp {}'.format(nlrg, add_SNeIa, add_SNeIIp))
         tflux, twave, ttargets, ttruth, tobjtruth = mockmaker(Maker,template_maker, seed=seed, nrand=nrand,sne_fluxratiorange=flux_ratio_range
             ,sne_filter='decam2014-r',healpixel=healpixel,nside=nside)
