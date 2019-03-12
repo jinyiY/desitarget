@@ -3436,7 +3436,7 @@ class LRGMaker(SelectTargets):
     wave, template_maker = None, None
     GMM_LRG, KDTree_north, KDTree_south = None, None, None
 
-    def __init__(self, seed=None, nside_chunk=128,add_SNeIa=False, add_SNeIIp=False **kwargs):
+    def __init__(self, seed=None, nside_chunk=128,add_SNeIa=False, add_SNeIIp=False, **kwargs):
         from desisim.templates import LRG
         from desiutil.sklearn import GaussianMixtureModel
 
