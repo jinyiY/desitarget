@@ -5,7 +5,7 @@
 desitarget.io
 =============
 
-This file knows how to write a TS catalogue.
+Functions for reading, writing and manipulating files related to targeting.
 """
 from __future__ import (absolute_import, division)
 #
@@ -16,13 +16,23 @@ import re
 from . import __version__ as desitarget_version
 import numpy.lib.recfunctions as rfn
 import healpy as hp
+from glob import glob
 
 from desiutil import depend
+from desitarget.geomask import hp_in_box, box_area, is_in_box
+from desitarget.geomask import hp_in_cap, cap_area, is_in_cap
+from desitarget.geomask import is_in_hp, nside2nside, pixarea2nside
+
+# ADM set up the DESI default logger
+from desiutil.log import get_logger
+log = get_logger()
 
 # ADM this is a lookup dictionary to map RELEASE to a simpler "North" or "South".
 # ADM photometric system. This will expand with the definition of RELEASE in the
 # ADM Data Model (e.g. https://desi.lbl.gov/trac/wiki/DecamLegacy/DR4sched).
-releasedict = {3000: 'S', 4000: 'N', 5000: 'S', 6000: 'N', 7000: 'S'}
+# ADM 7999 were the dr8a test reductions, for which only 'S' surveys were processed.
+releasedict = {3000: 'S', 4000: 'N', 5000: 'S', 6000: 'N', 7000: 'S', 7999: 'S',
+               8000: 'S', 8001: 'N'}
 
 oldtscolumns = [
     'BRICKID', 'BRICKNAME', 'OBJID', 'TYPE',
@@ -41,8 +51,8 @@ oldtscolumns = [
 # ADM this is an empty array of the full TS data model columns and dtypes
 # ADM other columns can be added in read_tractor.
 tsdatamodel = np.array([], dtype=[
-    ('RELEASE', '>i4'), ('BRICKID', '>i4'), ('BRICKNAME', 'S8'),
-    ('OBJID', '<i4'), ('TYPE', 'S4'), ('RA', '>f8'), ('RA_IVAR', '>f4'),
+    ('RELEASE', '>i2'), ('BRICKID', '>i4'), ('BRICKNAME', 'S8'),
+    ('OBJID', '>i4'), ('TYPE', 'S4'), ('RA', '>f8'), ('RA_IVAR', '>f4'),
     ('DEC', '>f8'), ('DEC_IVAR', '>f4'), ('DCHISQ', '>f4', (5,)), ('EBV', '>f4'),
     ('FLUX_G', '>f4'), ('FLUX_R', '>f4'), ('FLUX_Z', '>f4'),
     ('FLUX_IVAR_G', '>f4'), ('FLUX_IVAR_R', '>f4'), ('FLUX_IVAR_Z', '>f4'),
@@ -72,11 +82,23 @@ dr7datamodel = np.array([], dtype=[
     ('BRIGHTSTARINBLOB', '?')
     ])
 
+dr8datamodel = np.array([], dtype=[
+    ('FIBERFLUX_G', '>f4'), ('FIBERFLUX_R', '>f4'), ('FIBERFLUX_Z', '>f4'),
+    ('FIBERTOTFLUX_G', '>f4'), ('FIBERTOTFLUX_R', '>f4'), ('FIBERTOTFLUX_Z', '>f4'),
+    ('BRIGHTBLOB', '>i2')
+    ])
+
 
 def desitarget_nside():
-    """Default HEALPix Nside for all target selection algorithms. """
+    """Default HEALPix Nside for all target selection algorithms."""
     nside = 64
     return nside
+
+
+def desitarget_resolve_dec():
+    """Default Dec cut to separate targets in BASS/MzLS from DECaLS."""
+    dec = 32.375
+    return dec
 
 
 def convert_from_old_data_model(fx, columns=None):
@@ -91,7 +113,7 @@ def convert_from_old_data_model(fx, columns=None):
 
     Returns
     -------
-    :class:`numpy.ndarray`
+    :class:`~numpy.ndarray`
         Array with the tractor schema, uppercase field names.
 
     Notes
@@ -153,12 +175,12 @@ def add_gaia_columns(indata):
 
     Parameters
     ----------
-    indata : :class:`numpy.ndarray`
+    indata : :class:`~numpy.ndarray`
         Numpy structured array to which to add Gaia-relevant columns.
 
     Returns
     -------
-    :class:`numpy.ndarray`
+    :class:`~numpy.ndarray`
         Input array with the Gaia columns added.
 
     Notes
@@ -188,26 +210,35 @@ def add_gaia_columns(indata):
     return outdata
 
 
-def add_dr7_columns(indata):
-    """Add columns that are in dr7 that weren't in dr6.
+def add_dr8_columns(indata):
+    """Add columns that are in dr7/dr8 that weren't in dr6.
 
     Parameters
     ----------
-    indata : :class:`numpy.ndarray`
-        Numpy structured array to which to add DR7 columns.
+    indata : :class:`~numpy.ndarray`
+        Numpy structured array to which to add DR7/DR8 columns.
 
     Returns
     -------
-    :class:`numpy.ndarray`
-        Input array with DR7 columns added.
+    :class:`~numpy.ndarray`
+        Input array with DR7/DR8 columns added.
 
     Notes
     -----
         - DR7 columns are stored in :mod:`desitarget.io.dr7datamodel`.
-        - The DR7 columns returned are set to all ``0`` or ``False``.
+        - DR8 columns are stored in :mod:`desitarget.io.dr8datamodel`.
+        - The returned columns are set to all ``0`` or ``False``.
     """
-    # ADM create the combined data model.
-    dt = indata.dtype.descr + dr7datamodel.dtype.descr
+    # ADM if BRIGHSTARINBLOB was sent (the dr7 version of BRIGHTBLOB)
+    # ADM then we need to update that column.
+    if 'BRIGHTSTARINBLOB' in indata.dtype.names:
+        newt = dr8datamodel["BRIGHTBLOB"].dtype.str
+        newdt = ("BRIGHTBLOB", newt)
+        dt = [fld if fld[0] != 'BRIGHTSTARINBLOB' else newdt
+              for fld in indata.dtype.descr]
+    else:
+        # ADM otherwise, create the combined data model.
+        dt = indata.dtype.descr + dr8datamodel.dtype.descr
 
     # ADM create a new numpy array with the fields from the new data model...
     nrows = len(indata)
@@ -215,7 +246,10 @@ def add_dr7_columns(indata):
 
     # ADM ...and populate them with the passed columns of data.
     for col in indata.dtype.names:
-        outdata[col] = indata[col]
+        if col == "BRIGHTSTARINBLOB":
+            outdata["BRIGHTBLOB"] = indata["BRIGHTSTARINBLOB"].astype(newt)
+        else:
+            outdata[col] = indata[col]
 
     return outdata
 
@@ -225,12 +259,12 @@ def add_photsys(indata):
 
     Parameters
     ----------
-    indata : :class:`numpy.ndarray`
+    indata : :class:`~numpy.ndarray`
         Numpy structured array to which to add PHOTSYS column.
 
     Returns
     -------
-    :class:`numpy.ndarray`
+    :class:`~numpy.ndarray`
         Input array with PHOTSYS added (and set using RELEASE).
 
     Notes
@@ -276,13 +310,9 @@ def read_tractor(filename, header=False, columns=None):
 
     Returns
     -------
-    :class:`numpy.ndarray`
+    :class:`~numpy.ndarray`
         Array with the tractor schema, uppercase field names.
     """
-    # ADM set up the default DESI logger.
-    from desiutil.log import get_logger
-    log = get_logger()
-
     check_fitsio_version()
 
     fx = fitsio.FITS(filename, upper=True)
@@ -308,6 +338,13 @@ def read_tractor(filename, header=False, columns=None):
        (('BRIGHTSTARINBLOB' in fxcolnames) or ('brightstarinblob' in fxcolnames)):
         for col in dr7datamodel.dtype.names:
             readcolumns.append(col)
+    # ADM if BRIGHTBLOB exists (it does for DR8, not for DR7) add it and
+    # ADM the other DR6->DR8 data model updates.
+    else:
+        if (columns is None) and \
+           (('BRIGHTBLOB' in fxcolnames) or ('brightblob' in fxcolnames)):
+            for col in dr8datamodel.dtype.names:
+                readcolumns.append(col)
 
     # ADM if Gaia information was passed, add it to the columns to read.
     if (columns is None):
@@ -338,10 +375,10 @@ def read_tractor(filename, header=False, columns=None):
        (('REF_ID' not in fxcolnames) and ('ref_id' not in fxcolnames)):
         data = add_gaia_columns(data)
 
-    # ADM add DR7 data model updates (with zero/False) columns if not passed.
+    # ADM add DR8 data model updates (with zero/False) columns if not passed.
     if (columns is None) and \
-       (('BRIGHTSTARINBLOB' not in fxcolnames) and ('brightstarinblob' not in fxcolnames)):
-        data = add_dr7_columns(data)
+       (('BRIGHTBLOB' not in fxcolnames) and ('brightblob' not in fxcolnames)):
+        data = add_dr8_columns(data)
 
     # ADM Empty (length 0) files have dtype='>f8' instead of 'S8' for brickname.
     if len(data) == 0:
@@ -427,24 +464,37 @@ def release_to_photsys(release):
 
 
 def write_targets(filename, data, indir=None, qso_selection=None,
-                  sandboxcuts=False, nside=None, survey="?"):
+                  sandboxcuts=False, nside=None, survey="?",
+                  nsidefile=None, hpxlist=None):
     """Write a target catalogue.
 
     Parameters
     ----------
-    filename : output target selection file.
-    data     : numpy structured array of targets to save.
-    nside: :class:`int`
+    filename : :class:`str`
+        output target selection file.
+    data : :class:`~numpy.ndarray`
+        numpy structured array of targets to save.
+    indir, qso_selection : :class:`str`, optional, default to `None`
+        If passed, note these as the input directory and
+        quasar selection method in the output file header.
+    sandboxcuts : :class:`bool`, optional, defaults to ``False``
+        If passed, note this whether we ran target seletion
+        in the sandbox in the output file header.
+    nside : :class:`int`, optional, defaults to `None`
         If passed, add a column to the targets array popluated
         with HEALPixels at resolution `nside`.
-    survey: :class:`str`, optional, defaults to "?"
+    survey : :class:`str`, optional, defaults to "?"
         Written to output file header as the keyword `SURVEY`.
+    nsidefile : :class:`int`, optional, defaults to `None`
+        Passed to indicate in the output file header that the targets
+        have been limited to only certain HEALPixels at a given
+        nside. Used in conjunction with `hpxlist`.
+    hpxlist : :class:`list`, optional, defaults to `None`
+        Passed to indicate in the output file header that the targets
+        have been limited to only this list of HEALPixels. Used in
+        conjunction with `nsidefile`.
     """
     # FIXME: assert data and tsbits schema
-
-    # ADM set up the default logger.
-    from desiutil.log import get_logger
-    log = get_logger()
 
     # ADM use RELEASE to determine the release string for the input targets.
     ntargs = len(data)
@@ -487,11 +537,23 @@ def write_targets(filename, data, indir=None, qso_selection=None,
     # ADM add the type of survey (main, commissioning; or "cmx", sv) to the header.
     hdr["SURVEY"] = survey
 
+    # ADM record whether this file has been limited to only certain HEALPixels.
+    if hpxlist is not None or nsidefile is not None:
+        # ADM hpxlist and nsidefile need to be passed together.
+        if hpxlist is None or nsidefile is None:
+            msg = 'Both hpxlist (={}) and nsidefile (={}) need to be set' \
+                .format(hpxlist, nsidefile)
+            log.critical(msg)
+            raise ValueError(msg)
+        hdr['FILENSID'] = nsidefile
+        hdr['FILENEST'] = True
+        hdr['FILEHPX'] = hpxlist
+
     fitsio.write(filename, data, extname='TARGETS', header=hdr, clobber=True)
 
 
 def write_skies(filename, data, indir=None, apertures_arcsec=None,
-                badskyflux=None, nside=None):
+                nskiespersqdeg=None, nside=None):
     """Write a target catalogue of sky locations.
 
     Parameters
@@ -500,23 +562,19 @@ def write_skies(filename, data, indir=None, apertures_arcsec=None,
         Output target selection file name
     data  : :class:`~numpy.ndarray`
         Array of skies to write to file.
-    indir : :class:`str`, optional, defaults to None
+    indir : :class:`str`, optional
         Name of input Legacy Survey Data Release directory, write to header
         of output file if passed (and if not None).
-    apertures_arcsec : :class:`list` or `float`, optional, defaults to None
-        list of aperture radii in arcsecondsm write each aperture as an
+    apertures_arcsec : :class:`list` or `float`, optional
+        list of aperture radii in arcseconds to write each aperture as an
         individual line in the header, if passed (and if not None).
-    badskyflux : :class:`list` or `float`, optional, defaults to None
-        list of aperture radii in arcsecondsm write each aperture as an
-        individual line in the header, if passed (and if not None).
-    nside: :class:`int`
+    nskiespersqdeg : :class:`float`, optional
+        Number of sky locations generated per sq. deg., write to header
+        of output file if passed (and if not None).
+    nside: :class:`int`, optional
         If passed, add a column to the skies array popluated with HEALPixels
         at resolution `nside`.
     """
-    # ADM set up the default logger.
-    from desiutil.log import get_logger
-    log = get_logger()
-
     nskies = len(data)
 
     # ADM force OBSCONDITIONS to be 65535
@@ -539,14 +597,11 @@ def write_skies(filename, data, indir=None, apertures_arcsec=None,
     if apertures_arcsec is not None:
         for i, ap in enumerate(apertures_arcsec):
             apname = "AP{}".format(i)
-            apsize = "{:.2f}".format(ap)
+            apsize = ap
             hdr[apname] = apsize
 
-    if badskyflux is not None:
-        for i, bs in enumerate(badskyflux):
-            bsname = "BADFLUX{}".format(i)
-            bssize = "{:.2f}".format(bs)
-            hdr[bsname] = bssize
+    if nskiespersqdeg is not None:
+        hdr['NPERSDEG'] = nskiespersqdeg
 
     # ADM add HEALPix column, if requested by input.
     if nside is not None:
@@ -564,7 +619,8 @@ def write_skies(filename, data, indir=None, apertures_arcsec=None,
     fitsio.write(filename, data, extname='SKY_TARGETS', header=hdr, clobber=True)
 
 
-def write_gfas(filename, data, indir=None, nside=None, gaiaepoch=None):
+def write_gfas(filename, data, indir=None, nside=None, survey="?",
+               gaiaepoch=None):
     """Write a catalogue of Guide/Focus/Alignment targets.
 
     Parameters
@@ -579,14 +635,12 @@ def write_gfas(filename, data, indir=None, nside=None, gaiaepoch=None):
     nside: :class:`int`, defaults to None.
         If passed, add a column to the GFAs array popluated with HEALPixels
         at resolution `nside`.
+    survey : :class:`str`, optional, defaults to "?"
+        Written to output file header as the keyword `SURVEY`.
     gaiaepoch: :class:`float`, defaults to None
         Gaia proper motion reference epoch. If not None, write to header of
         output file. If None, default to an epoch of 2015.5.
     """
-    # ADM set up the default logger.
-    from desiutil.log import get_logger
-    log = get_logger()
-
     # ADM rename 'TYPE' to 'MORPHTYPE'.
     data = rfn.rename_fields(data, {'TYPE': 'MORPHTYPE'})
 
@@ -611,6 +665,10 @@ def write_gfas(filename, data, indir=None, nside=None, gaiaepoch=None):
         hdr['HPXNSIDE'] = nside
         hdr['HPXNEST'] = True
 
+    # ADM add the type of survey (main, or commissioning "cmx") to the header.
+    hdr["SURVEY"] = survey
+
+    # ADM add the Gaia reference epoch, or pass 2015.5 if not included.
     hdr['REFEPOCH'] = {'name': 'REFEPOCH',
                        'value': 2015.5,
                        'comment': "Gaia Proper Motion Reference Epoch"}
@@ -620,7 +678,7 @@ def write_gfas(filename, data, indir=None, nside=None, gaiaepoch=None):
     fitsio.write(filename, data, extname='GFA_TARGETS', header=hdr, clobber=True)
 
 
-def write_randoms(filename, data, indir=None, nside=None, density=None):
+def write_randoms(filename, data, indir=None, hdr=None, nside=None, density=None):
     """Write a catalogue of randoms and associated pixel-level information.
 
     Parameters
@@ -632,6 +690,8 @@ def write_randoms(filename, data, indir=None, nside=None, density=None):
     indir : :class:`str`, optional, defaults to None
         Name of input Legacy Survey Data Release directory, write to header
         of output file if passed (and if not None).
+    hdr : :class:`str`, optional, defaults to `None`
+        If passed, use this header to start the header of the output `filename`.
     nside: :class:`int`
         If passed, add a column to the randoms array popluated with HEALPixels
         at resolution `nside`.
@@ -639,12 +699,10 @@ def write_randoms(filename, data, indir=None, nside=None, density=None):
         Number of points per sq. deg. at which the catalog was generated,
         write to header of the output file if not None.
     """
-    # ADM set up the default logger.
-    from desiutil.log import get_logger
-    log = get_logger()
-
-    # ADM create header to include versions, etc.
-    hdr = fitsio.FITSHDR()
+    # ADM create header to include versions, etc. If a `hdr` was
+    # ADM passed, then use it, if not then create a new header.
+    if hdr is None:
+        hdr = fitsio.FITSHDR()
     depend.setdep(hdr, 'desitarget', desitarget_version)
     depend.setdep(hdr, 'desitarget-git', gitversion())
 
@@ -706,9 +764,6 @@ def iter_files(root, prefix, ext='fits'):
 def list_sweepfiles(root):
     """Return a list of sweep files found under `root` directory.
     """
-    from desiutil.log import get_logger
-    log = get_logger(timestamp=True)
-
     # ADM check for duplicate files in case the listing was run
     # ADM at too low a level in the directory structure.
     check = [os.path.basename(x) for x in iter_sweepfiles(root)]
@@ -727,9 +782,6 @@ def iter_sweepfiles(root):
 def list_tractorfiles(root):
     """Return a list of tractor files found under `root` directory.
     """
-    from desiutil.log import get_logger
-    log = get_logger(timestamp=True)
-
     # ADM check for duplicate files in case the listing was run
     # ADM at too low a level in the directory structure.
     check = [os.path.basename(x) for x in iter_tractorfiles(root)]
@@ -903,10 +955,6 @@ def load_pixweight(inmapfile, nside, pixmap=None):
     :class:`~numpy.array`
         HEALPixel weight map resampled to the requested nside.
     """
-    import healpy as hp
-    from desiutil.log import get_logger
-    log = get_logger()
-
     if pixmap is not None:
         log.debug('Using input pixel weight map of length {}.'.format(len(pixmap)))
     else:
@@ -952,10 +1000,6 @@ def load_pixweight_recarray(inmapfile, nside, pixmap=None):
           if a column `HPXPIXEL` is passed. That column is reassigned the appropriate
           pixel number at the new nside.
     """
-    import healpy as hp
-    from desiutil.log import get_logger
-    log = get_logger()
-
     if pixmap is not None:
         log.debug('Using input pixel weight map of length {}.'.format(len(pixmap)))
     else:
@@ -1022,7 +1066,10 @@ def read_external_file(filename, header=False, columns=["RA", "DEC"]):
 
     Returns
     -------
-    :class:`numpy.ndarray``
+    :class:`~numpy.ndarray`
+        The output data array.
+    :class:`~numpy.ndarray`, optional
+        The output file header, if input `header` was ``True``.
 
     Notes
     -----
@@ -1055,3 +1102,293 @@ def read_external_file(filename, header=False, columns=["RA", "DEC"]):
         return outdata, hdr
     else:
         return outdata
+
+
+def decode_sweep_name(sweepname, nside=None, inclusive=True, fact=4):
+    """Retrieve RA/Dec edges from a full directory path to a sweep file
+
+    Parameters
+    ----------
+    sweepname : :class:`str`
+        Full path to a sweep file, e.g., /a/b/c/sweep-350m005-360p005.fits
+    nside : :class:`int`, optional, defaults to None
+        (NESTED) HEALPixel nside
+    inclusive : :class:`book`, optional, defaults to ``True``
+        see documentation for `healpy.query_polygon()`
+    fact : :class:`int`, optional defaults to 4
+        see documentation for `healpy.query_polygon()`
+
+    Returns
+    -------
+    :class:`list` (if nside is None)
+        A 4-entry list of the edges of the region covered by the sweeps file
+        in the form [RAmin, RAmax, DECmin, DECmax]
+        For the above example this would be [350., 360., -5., 5.]
+    :class:`list` (if nside is not None)
+        A list of HEALPixels that touch the  files at the passed `nside`
+        For the above example this would be [16, 17, 18, 19]
+    """
+    # ADM extract just the file part of the name.
+    sweepname = os.path.basename(sweepname)
+
+    # ADM the RA/Dec edges.
+    ramin, ramax = float(sweepname[6:9]), float(sweepname[14:17])
+    decmin, decmax = float(sweepname[10:13]), float(sweepname[18:21])
+
+    # ADM flip the signs on the DECs, if needed.
+    if sweepname[9] == 'm':
+        decmin *= -1
+    if sweepname[17] == 'm':
+        decmax *= -1
+
+    if nside is None:
+        return [ramin, ramax, decmin, decmax]
+
+    pixnum = hp_in_box(nside, [ramin, ramax, decmin, decmax],
+                       inclusive=inclusive, fact=fact)
+
+    return pixnum
+
+
+def check_hp_target_dir(hpdirname):
+    """Check fidelity of a directory of HEALPixel-partitioned targets.
+
+    Parameters
+    ----------
+    hpdirname : :class:`str`
+        Full path to a directory containing targets that have been
+        split by HEALPixel.
+
+    Returns
+    -------
+    :class:`int`
+        The HEALPixel NSIDE for the files in the passed directory.
+    :class:`dict`
+        A dictionary where the keys are each HEALPixel covered in the
+        passed directory and the values are the file that includes
+        that HEALPixel.
+
+    Notes
+    -----
+        - Checks that all files are at the same NSIDE.
+        - Checks that no two files contain the same HEALPixels.
+        - Checks that HEALPixel numbers are consistent with NSIDE.
+    """
+    # ADM glob all the files in the directory, read the pixel
+    # ADM numbers and NSIDEs.
+    nside = []
+    pixlist = []
+    fns = glob(os.path.join(hpdirname, "*fits"))
+    pixdict = {}
+    for fn in fns:
+        hdr = fitsio.read_header(fn, "TARGETS")
+        nside.append(hdr["FILENSID"])
+        pixels = hdr["FILEHPX"]
+        # ADM create a look-up dictionary of file-for-each-pixel.
+        for pix in pixels:
+            pixdict[pix] = fn
+        pixlist.append(pixels)
+    nside = np.array(nside)
+    # ADM as well as having just an array of all the pixels.
+    pixlist = np.hstack(pixlist)
+
+    msg = None
+    # ADM check all NSIDEs are the same.
+    if not np.all(nside == nside[0]):
+        msg = 'Not all files in {} are at the same NSIDE'     \
+            .format(hpdirname)
+
+    # ADM check that no two files contain the same HEALPixels.
+    if not len(set(pixlist)) == len(pixlist):
+        dup = set([pix for pix in pixlist if list(pixlist).count(pix) > 1])
+        msg = 'Duplicate pixel ({}) in files in {}'           \
+            .format(dup, hpdirname)
+
+    # ADM check that the pixels are consistent with the nside.
+    goodpix = np.arange(hp.nside2npix(nside[0]))
+    badpix = set(pixlist) - set(goodpix)
+    if len(badpix) > 0:
+        msg = 'Pixel ({}) not allowed at NSIDE={} in {}'.     \
+              format(badpix, nside[0], hpdirname)
+
+    if msg is not None:
+        log.critical(msg)
+        raise AssertionError(msg)
+
+    return nside[0], pixdict
+
+
+def read_targets_in_hp(hpdirname, nside, pixlist, columns=None):
+    """Read in targets in a set of HEALPixels.
+
+    Parameters
+    ----------
+    hpdirname : :class:`str`
+        Full path to either a directory containing targets that
+        have been partitioned by HEALPixel (i.e. as made by
+        `select_targets` with the `bundle_files` option). Or the
+        name of a single file of targets.
+    nside : :class:`int`
+        The (NESTED) HEALPixel nside.
+    pixlist : :class:`list` or `int` or `~numpy.ndarray`
+        Return targets in these HEALPixels at the passed `nside`.
+    columns : :class:`list`, optional
+        Only read in these target columns.
+
+    Returns
+    -------
+    :class:`~numpy.ndarray`
+        An array of targets in the passed pixels.
+    """
+    # ADM we'll need RA/Dec for final cuts, so ensure they're read.
+    addedcols = []
+    columnscopy = None
+    if columns is not None:
+        # ADM make a copy of columns, as it's a kwarg we'll modify.
+        columnscopy = columns.copy()
+        for radec in ["RA", "DEC"]:
+            if radec not in columnscopy:
+                columnscopy.append(radec)
+                addedcols.append(radec)
+
+    # ADM if a directory was passed, do fancy HEALPixel parsing...
+    if os.path.isdir(hpdirname):
+        # ADM check, and grab information from, the target directory.
+        filenside, filedict = check_hp_target_dir(hpdirname)
+
+        # ADM change the passed pixels to the nside of the file schema.
+        filepixlist = nside2nside(nside, filenside, pixlist)
+
+        # ADM only consider pixels for which we have a file.
+        isindict = [pix in filedict for pix in filepixlist]
+        filepixlist = filepixlist[isindict]
+
+        # ADM make sure each file is only read once.
+        infiles = set([filedict[pix] for pix in filepixlist])
+
+        # ADM read in the files and concatenate the resulting targets.
+        targets = []
+        for infile in infiles:
+            targets.append(fitsio.read(infile, columns=columnscopy))
+        targets = np.concatenate(targets)
+    # ADM ...otherwise just read in the targets.
+    else:
+        targets = fitsio.read(hpdirname, columns=columnscopy)
+
+    # ADM restrict the targets to the actual requested HEALPixels...
+    ii = is_in_hp(targets, nside, pixlist)
+    # ADM ...and remove RA/Dec columns if we added them.
+    targets = rfn.drop_fields(targets[ii], addedcols)
+
+    return targets
+
+
+def read_targets_in_box(hpdirname, radecbox=[0., 360., -90., 90.],
+                        columns=None):
+    """Read in targets in an RA/Dec box.
+
+    Parameters
+    ----------
+    hpdirname : :class:`str`
+        Full path to either a directory containing targets that
+        have been partitioned by HEALPixel (i.e. as made by
+        `select_targets` with the `bundle_files` option). Or the
+        name of a single file of targets.
+    radecbox : :class:`list`, defaults to the entire sky
+        4-entry list of coordinates [ramin, ramax, decmin, decmax]
+        forming the edges of a box in RA/Dec (degrees).
+    columns : :class:`list`, optional
+        Only read in these target columns.
+
+    Returns
+    -------
+    :class:`~numpy.ndarray`
+        An array of targets in the passed RA/Dec box.
+    """
+    # ADM we'll need RA/Dec for final cuts, so ensure they're read.
+    addedcols = []
+    columnscopy = None
+    if columns is not None:
+        # ADM make a copy of columns, as it's a kwarg we'll modify.
+        columnscopy = columns.copy()
+        for radec in ["RA", "DEC"]:
+            if radec not in columnscopy:
+                columnscopy.append(radec)
+                addedcols.append(radec)
+
+    # ADM if a directory was passed, do fancy HEALPixel parsing...
+    if os.path.isdir(hpdirname):
+        # ADM approximate nside for area of passed box.
+        nside = pixarea2nside(box_area(radecbox))
+
+        # ADM HEALPixels that touch the box for that nside.
+        pixlist = hp_in_box(nside, radecbox)
+
+        # ADM read in targets in these HEALPixels.
+        targets = read_targets_in_hp(hpdirname, nside, pixlist,
+                                     columns=columnscopy)
+    # ADM ...otherwise just read in the targets.
+    else:
+        targets = fitsio.read(hpdirname, columns=columnscopy)
+
+    # ADM restrict only to targets in the requested RA/Dec box...
+    ii = is_in_box(targets, radecbox)
+    # ADM ...and remove RA/Dec columns if we added them.
+    targets = rfn.drop_fields(targets[ii], addedcols)
+
+    return targets
+
+
+def read_targets_in_cap(hpdirname, radecrad, columns=None):
+    """Read in targets in an RA, Dec, radius cap.
+
+    Parameters
+    ----------
+    hpdirname : :class:`str`
+        Full path to either a directory containing targets that
+        have been partitioned by HEALPixel (i.e. as made by
+        `select_targets` with the `bundle_files` option). Or the
+        name of a single file of targets.
+    radecrad : :class:`list`
+        3-entry list of coordinates [ra, dec, radius] forming a cap or
+        "circle" on the sky. ra, dec and radius are all in degrees.
+    columns : :class:`list`, optional
+        Only read in these target columns.
+
+    Returns
+    -------
+    :class:`~numpy.ndarray`
+        An array of targets in the passed RA/Dec box.
+    """
+    # ADM we'll need RA/Dec for final cuts, so ensure they're read.
+    addedcols = []
+    columnscopy = None
+    if columns is not None:
+        # ADM make a copy of columns, as it's a kwarg we'll modify.
+        columnscopy = columns.copy()
+        for radec in ["RA", "DEC"]:
+            if radec not in columnscopy:
+                columnscopy.append(radec)
+                addedcols.append(radec)
+
+    # ADM if a directory was passed, do fancy HEALPixel parsing...
+    if os.path.isdir(hpdirname):
+        # ADM approximate nside for area of passed cap.
+        nside = pixarea2nside(cap_area(np.array(radecrad[2])))
+
+        # ADM HEALPixels that touch the cap for that nside.
+        pixlist = hp_in_cap(nside, radecrad)
+
+        # ADM read in targets in these HEALPixels.
+        targets = read_targets_in_hp(hpdirname, nside, pixlist,
+                                     columns=columnscopy)
+    # ADM ...otherwise just read in the targets.
+    else:
+        targets = fitsio.read(hpdirname, columns=columnscopy)
+
+    # ADM restrict only to targets in the requested cap...
+    ii = is_in_cap(targets, radecrad)
+    # ADM ...and remove RA/Dec columns if we added them.
+    targets = rfn.drop_fields(targets[ii], addedcols)
+
+    return targets
