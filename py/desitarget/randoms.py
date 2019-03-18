@@ -16,9 +16,8 @@ import healpy as hp
 import fitsio
 from glob import glob
 from desitarget.gaiamatch import _get_gaia_dir
-from desitarget.geomask import bundle_bricks, box_area
+
 from desitarget.targetmask import desi_mask, bgs_mask, mws_mask
-from desitarget.targets import resolve
 
 # ADM the parallelization script
 from desitarget.internal import sharedmem
@@ -38,28 +37,27 @@ log = get_logger()
 start = time()
 
 
-def dr_extension(drdir):
+def dr_extension(drdir="/global/project/projectdirs/cosmo/data/legacysurvey/dr4/"):
     """Determine the extension information for files in a legacy survey coadd directory
 
     Parameters
     ----------
-    drdir : :class:`str`
+    drdir : :class:`str`, optional, defaults to dr4 root directory on NERSC
        The root directory pointing to a Data Release from the Legacy Surveys
-       e.g. /global/project/projectdirs/cosmo/data/legacysurvey/dr7.
 
     Returns
     -------
     :class:`str`
-        Whether the file extension is 'gz' or 'fz'.
+        Whether the file extension is 'gz' or 'fz'
     :class:`int`
-        The corresponding FITS extension number that needs to be read (0 or 1).
+        The corresponding FITS extension number that needs to be read (0 or 1)
     """
 
     from glob import iglob
 
-    # ADM for speed, create a generator of all of the nexp files in the coadd directory.
+    # ADM for speed, create a generator of all of the nexp files in the coadd directory
     gen = iglob(drdir+"/coadd/*/*/*nexp*")
-    # ADM and pop the first one.
+    # ADM and pop the first one
     anexpfile = next(gen)
     extn = anexpfile[-2:]
 
@@ -76,20 +74,20 @@ def randoms_in_a_brick_from_edges(ramin, ramax, decmin, decmax,
     Parameters
     ----------
     ramin : :class:`float`
-        The minimum "edge" of the brick in Right Ascension.
+        The minimum "edge" of the brick in Right Ascension
     ramax : :class:`float`
-        The maximum "edge" of the brick in Right Ascension.
+        The maximum "edge" of the brick in Right Ascension
     decmin : :class:`float`
-        The minimum "edge" of the brick in Declination.
+        The minimum "edge" of the brick in Declination
     decmax : :class:`float`
-        The maximum "edge" of the brick in Declination.
+        The maximum "edge" of the brick in Declination
     density : :class:`int`, optional, defaults to 100,000
         The number of random points to return per sq. deg. As a typical brick is
-        ~0.25 x 0.25 sq. deg. about (0.0625*density) points will be returned.
+        ~0.25 x 0.25 sq. deg. about (0.0625*density) points will be returned
     poisson : :class:`boolean`, optional, defaults to True
         Modify the number of random points in the brick so that instead of simply
         being the brick area x the density, it is a number drawn from a Poisson
-        distribution with the expectation being the brick area x the density.
+        distribution with the expectation being the brick area x the density
 
     Returns
     -------
@@ -109,16 +107,17 @@ def randoms_in_a_brick_from_edges(ramin, ramax, decmin, decmax,
     # ADM sizes of 0.25 x 0.25 sq. deg., or not much larger than that
     if ramax - ramin > 350.:
         ramax -= 360.
-    spharea = box_area([ramin, ramax, decmin, decmax])
+    sindecmin, sindecmax = np.sin(np.radians(decmin)), np.sin(np.radians(decmax))
+    spharea = (ramax-ramin)*np.degrees(sindecmax-sindecmin)
 
     if poisson:
         nrand = int(np.random.poisson(spharea*density))
+
     else:
         nrand = int(spharea*density)
 #    log.info('Full area covered by brick is {:.5f} sq. deg....t = {:.1f}s'
 #              .format(spharea,time()-start))
     ras = np.random.uniform(ramin, ramax, nrand)
-    sindecmin, sindecmax = np.sin(np.radians(decmin)), np.sin(np.radians(decmax))
     decs = np.degrees(np.arcsin(1.-np.random.uniform(1-sindecmax, 1-sindecmin, nrand)))
 
     nrand = len(ras)
@@ -129,30 +128,30 @@ def randoms_in_a_brick_from_edges(ramin, ramax, decmin, decmax,
     return ras, decs
 
 
-def randoms_in_a_brick_from_name(brickname, drdir, density=100000):
-    """For a given brick name, return random (RA/Dec) positions in the brick.
+def randoms_in_a_brick_from_name(brickname, density=100000,
+                                 drdir="/global/project/projectdirs/cosmo/data/legacysurvey/dr4/"):
+    """For a given brick name, return random (RA/Dec) positions in the brick
 
     Parameters
     ----------
     brickname : :class:`str`
-        Name of brick in which to generate random points.
-    drdir : :class:`str`
-       The root directory pointing to a Data Release from the Legacy Surveys
-       e.g. /global/project/projectdirs/cosmo/data/legacysurvey/dr7.
+        Name of brick in which to generate random points
     density : :class:`int`, optional, defaults to 100,000
         The number of random points to return per sq. deg. As a typical brick is
-        ~0.25 x 0.25 sq. deg. about (0.0625*density) points will be returned.
+        ~0.25 x 0.25 sq. deg. about (0.0625*density) points will be returned
+    drdir : :class:`str`, optional, defaults to dr4 root directory on NERSC
+       The root directory pointing to a Data Release from the Legacy Surveys
 
     Returns
     -------
     :class:`~numpy.array`
-        Right Ascensions of random points in brick.
+        Right Ascensions of random points in brick
     :class:`~numpy.array`
-        Declinations of random points in brick.
+        Declinations of random points in brick
 
     Notes
     -----
-        - First version copied shamelessly from Anand Raichoor.
+        - First version copied shamelessly from Anand Raichoor
     """
     # ADM read in the survey bricks file to determine the brick boundaries
     hdu = fits.open(drdir+'survey-bricks.fits.gz')
@@ -177,13 +176,12 @@ def randoms_in_a_brick_from_name(brickname, drdir, density=100000):
     # ADM guard against potential wraparound bugs
     if ramax - ramin > 350.:
         ramax -= 360.
-    spharea = box_area([ramin, ramax, decmin, decmax])
-
+    sindecmin, sindecmax = np.sin(np.radians(decmin)), np.sin(np.radians(decmax))
+    spharea = (ramax-ramin)*np.degrees(sindecmax-sindecmin)
     nrand = int(spharea*density)
     # log.info('Full area covered by brick {} is {:.5f} sq. deg....t = {:.1f}s'
     #          .format(brickname,spharea,time()-start))
     ras = np.random.uniform(ramin, ramax, nrand)
-    sindecmin, sindecmax = np.sin(np.radians(decmin)), np.sin(np.radians(decmax))
     decs = np.degrees(np.arcsin(1.-np.random.uniform(1-sindecmax, 1-sindecmin, nrand)))
 
     nrand = len(ras)
@@ -194,59 +192,8 @@ def randoms_in_a_brick_from_name(brickname, drdir, density=100000):
     return ras, decs
 
 
-def _pre_or_post_dr8(drdir):
-    """Whether the imaging surveys directory structure is before or after DR8
-
-    Parameters
-    ----------
-    drdir : :class:`str`
-       The root directory pointing to a Data Release from the Legacy Surveys
-       e.g. /global/project/projectdirs/cosmo/data/legacysurvey/dr7.
-
-    Returns
-    -------
-    :class:`list`
-       For DR8, this just returns the original directory as a list. For DR8
-       this returns a list of two directories, one corresponding to DECaLS
-       and one corresponding to BASS/MzLS.
-    """
-    if os.path.exists(os.path.join(drdir, "coadd")):
-        drdirs = [drdir]
-    else:
-        wcoadd = glob(os.path.join(drdir, '*', "coadd"))
-        drdirs = [os.path.dirname(dd) for dd in wcoadd]
-
-    return drdirs
-
-
-def dr8_quantities_at_positions_in_a_brick(ras, decs, brickname, drdir):
-    """Wrapper on `quantities_at_positions_in_a_brick` for DR8 imaging and beyond.
-
-    Notes
-    -----
-        - See :func:`~desitarget.randoms.quantities_at_positions_in_a_brick`
-          for details. This function detects whether we have TWO coadd directories
-          in the `drdir` (e.g. one for DECaLS and one for MzLS/BASS) and, if so,
-          creates randoms for both surveys within the the passed brick. If not, it
-          defaults to the behavior for only having one survey.
-    """
-    # ADM determine whether we have to traverse two sets of brick directories.
-    drdirs = _pre_or_post_dr8(drdir)
-
-    # ADM determine the dictionary of quantities for one or two directories.
-    qall = []
-    for dd in drdirs:
-        qall.append(quantities_at_positions_in_a_brick(ras, decs, brickname, dd))
-
-    # ADM concatenate everything in qall into one dictionary.
-    qcombine = {}
-    for k in qall[0].keys():
-        qcombine[k] = np.concatenate([q[k] for q in qall])
-
-    return qcombine
-
-
-def quantities_at_positions_in_a_brick(ras, decs, brickname, drdir):
+def quantities_at_positions_in_a_brick(ras, decs, brickname,
+                                       drdir="/global/project/projectdirs/cosmo/data/legacysurvey/dr4/"):
     """Return NOBS, GALDEPTH, PSFDEPTH (per-band) at positions in one brick of the Legacy Surveys
 
     Parameters
@@ -257,9 +204,8 @@ def quantities_at_positions_in_a_brick(ras, decs, brickname, drdir):
         Declinations of interest (degrees).
     brickname : :class:`str`
         Name of brick which contains RA/Dec positions, e.g., '1351p320'.
-    drdir : :class:`str`
-       The root directory pointing to a Data Release from the Legacy Surveys
-       e.g. /global/project/projectdirs/cosmo/data/legacysurvey/dr7.
+    drdir : :class:`str`, optional, defaults to dr4 root directory on NERSC
+       The root directory pointing to a Data Release from the Legacy Surveys.
 
     Returns
     -------
@@ -270,41 +216,35 @@ def quantities_at_positions_in_a_brick(ras, decs, brickname, drdir):
 
     Notes
     -----
-        - First version copied shamelessly from Anand Raichoor.
+        - First version copied shamelessly from Anand Raichoor
     """
     npts = len(ras)
 
-    # ADM determine whether the coadd files have extension .gz or .fz based on the DR directory.
+    # ADM determine whether the coadd files have extension .gz or .fz based on the DR directory
     extn, extn_nb = dr_extension(drdir)
 
-    # ADM the output dictionary.
+    # ADM the output dictionary
     qdict = {}
 
     # as a speed up, we assume all images in different filters for the brick have the same WCS
     # -> if we have read it once (iswcs=True), we use this info
     iswcs = False
-    # ADM this will store the instrument name the first time we touch the wcs
-    instrum = None
 
-    rootdir = os.path.join(drdir, 'coadd', brickname[:3], brickname)
     # ADM loop through each of the filters and store the number of observations at the
-    # ADM RA and Dec positions of the passed points.
+    # ADM RA and Dec positions of the passed points
     for filt in ['g', 'r', 'z']:
         # ADM the input file labels, and output column names and output formats
-        # ADM for each of the quantities of interest.
+        # ADM for each of the quantities of interest
         qnames = zip(['nexp', 'depth', 'galdepth'],
                      ['nobs', 'psfdepth', 'galdepth'],
                      ['i2', 'f4', 'f4'])
         for qin, qout, qform in qnames:
-            fn = os.path.join(
-                rootdir, 'legacysurvey-{}-{}-{}.fits.{}'.format(brickname, qin, filt, extn)
-                )
-            # ADM only process the WCS if there is a file corresponding to this filter.
+            fn = (drdir+'/coadd/'+brickname[:3]+'/'+brickname+'/' +
+                  'legacysurvey-'+brickname+'-'+qin+'-'+filt+'.fits.'+extn)
+            # ADM only process the WCS if there is a file corresponding to this filter
             if os.path.exists(fn):
                 img = fits.open(fn)
                 if not iswcs:
-                    # ADM also store the instrument name, if it isn't yet stored.
-                    instrum = img[extn_nb].header["INSTRUME"].lower().strip()
                     w = WCS(img[extn_nb].header)
                     x, y = w.all_world2pix(ras, decs, 0)
                     iswcs = True
@@ -316,63 +256,57 @@ def quantities_at_positions_in_a_brick(ras, decs, brickname, drdir):
             else:
                 # log.info('no {} file at {}...t = {:.1f}s'
                 #          .format(qin+'_'+filt,fn,time()-start))
-                # ADM if the file doesn't exist, set the relevant quantities to zero.
+                # ADM if the file doesn't exist, set the relevant quantities to zero
+                # ADM for all of the passed
                 qdict[qout+'_'+filt] = np.zeros(npts, dtype=qform)
 
-    # ADM add the mask bits information.
-    fn = os.path.join(rootdir,
-                      'legacysurvey-{}-maskbits.fits.{}'.format(brickname, extn))
-    # ADM only process the WCS if there is a file corresponding to this filter.
+    # ADM add the mask bits information
+    fn = (drdir+'/coadd/'+brickname[:3]+'/'+brickname+'/' +
+          'legacysurvey-'+brickname+'-maskbits.fits.gz')
+    # ADM only process the WCS if there is a file corresponding to this filter
     if os.path.exists(fn):
         img = fits.open(fn)
-        # ADM use the WCS calculated for the per-filter quantities above, if it exists.
+        # ADM use the WCS calculated for the per-filter quantities above, if it exists
         if not iswcs:
-            # ADM also store the instrument name, if it isn't yet stored.
-            instrum = img[extn_nb].header["INSTRUME"].lower().strip()
-            w = WCS(img[extn_nb].header)
+            w = WCS(img[0].header)
             x, y = w.all_world2pix(ras, decs, 0)
             iswcs = True
-        # ADM add the maskbits to the dictionary.
-        qdict['maskbits'] = img[extn_nb].data[y.astype("int"), x.astype("int")]
+        # ADM add the maskbits to the dictionary
+        qdict['maskbits'] = img[0].data[y.astype("int"), x.astype("int")]
     else:
-        # ADM if there is no maskbits file, populate with zeros.
+        # ADM if there is no maskbits file, populate with zeros
         qdict['maskbits'] = np.zeros(npts, dtype='i2')
 
-    # ADM finally, populate the photometric system in the quantity dictionary.
-    if instrum == 'decam':
-        qdict['photsys'] = np.array([b"S" for x in range(npts)], dtype='|S1')
-    else:
-        qdict['photsys'] = np.array([b"N" for x in range(npts)], dtype='|S1')
 #    log.info('Recorded quantities for each point in brick {}...t = {:.1f}s'
 #                  .format(brickname,time()-start))
 
     return qdict
 
 
-def hp_with_nobs_in_a_brick(ramin, ramax, decmin, decmax, brickname, drdir,
-                            density=100000, nside=256):
-    """Given a brick's edges/name, count randoms with NOBS > 1 in HEALPixels touching that brick.
+def hp_with_nobs_in_a_brick(ramin, ramax, decmin, decmax, brickname, density=100000, nside=256,
+                            drdir="/global/project/projectdirs/cosmo/data/legacysurvey/dr4/"):
+    """Given a brick's edges/name, count randoms with NOBS > 1 in HEALPixels touching that brick
 
     Parameters
     ----------
     ramin : :class:`float`
-        The minimum "edge" of the brick in Right Ascension.
+        The minimum "edge" of the brick in Right Ascension
     ramax : :class:`float`
         The maximum "edge" of the brick in Right Ascension
     decmin : :class:`float`
-        The minimum "edge" of the brick in Declination.
+        The minimum "edge" of the brick in Declination
     decmax : :class:`float`
-        The maximum "edge" of the brick in Declination.
+        The maximum "edge" of the brick in Declination
     brickname : :class:`~numpy.array`
-        Brick names that corresponnds to the brick edges, e.g., '1351p320'.
-    drdir : :class:`str`
-       The root directory pointing to a Data Release from the Legacy Surveys
-       e.g. /global/project/projectdirs/cosmo/data/legacysurvey/dr7.
+        Brick names that corresponnds to the brick edges, e.g., '1351p320'
     density : :class:`int`, optional, defaults to 100,000
         The number of random points to return per sq. deg. As a typical brick is
-        ~0.25 x 0.25 sq. deg. about (0.0625*density) points will be returned.
+        ~0.25 x 0.25 sq. deg. about (0.0625*density) points will be returned
     nside : :class:`int`, optional, defaults to nside=256 (~0.0525 sq. deg. or "brick-sized")
-        The resolution (HEALPixel NESTED nside number) at which to build the map.
+        The resolution (HEALPixel NESTED nside number) at which to build the map
+    drdir : :class:`str`, optional, defaults to the DR4 root directory at NERSC
+        The root directory pointing to a Data Release of the Legacy Surveys, e.g.:
+        "/global/project/projectdirs/cosmo/data/legacysurvey/dr4/"
 
     Returns
     -------
@@ -380,33 +314,33 @@ def hp_with_nobs_in_a_brick(ramin, ramax, decmin, decmax, brickname, drdir,
         a numpy structured array with the following columns:
             HPXPIXEL: Integer numbers of (only) those HEALPixels that overlap the passed brick
             HPXCOUNT: Numbers of random points with one or more observations (NOBS > 0) in the
-                passed Data Release of the Legacy Surveys for each returned HPXPIXEL.
+                passed Data Release of the Legacy Surveys for each returned HPXPIXEL
 
     Notes
     -----
-        - The HEALPixel numbering uses the NESTED scheme.
+        - The HEALPixel numbering uses the NESTED scheme
         - In the event that there are no pixels with one or more observations in the passed
-          brick, and empty structured array will be returned.
+          brick, and empty structured array will be returned
     """
-    # ADM this is only intended to work on one brick, so die if a larger array is passed.
+    # ADM this is only intended to work on one brick, so die if a larger array is passed
     if not isinstance(brickname, str):
         log.fatal("Only one brick can be passed at a time!")
         raise ValueError
 
     # ADM generate an empty structured array to return in the event that no pixels with
-    # ADM counts were found.
+    # ADM counts were found
     hpxinfo = np.zeros(0, dtype=[('HPXPIXEL', '>i4'), ('HPXCOUNT', '>i4')])
 
-    # ADM generate random points within the brick at the requested density.
+    # ADM generate random points within the brick at the requested density
     ras, decs = randoms_in_a_brick_from_edges(ramin, ramax, decmin, decmax, density=density)
 
-    # ADM retrieve the number of observations for each random point.
+    # ADM retrieve the number of observations for each random point
     nobs_g, nobs_r, nobs_z = nobs_at_positions_in_a_brick(ras, decs, brickname, drdir=drdir)
 
-    # ADM only retain points with one or more observations in all bands.
+    # ADM only retain points with one or more observations in all bands
     w = np.where((nobs_g > 0) & (nobs_r > 0) & (nobs_z > 0))
 
-    # ADM if there were some non-zero observations, populate the pixel numbers and counts.
+    # ADM if there were some non-zero observations, populate the pixel numbers and counts
     if len(w[0]) > 0:
         pixnums = hp.ang2pix(nside, np.radians(90.-decs[w]), np.radians(ras[w]), nest=True)
         pixnum, pixcnt = np.unique(pixnums, return_counts=True)
@@ -442,8 +376,9 @@ def get_dust(ras, decs, scaling=1, dustdir=None):
     return SFDMap(mapdir=dustdir).ebv(ras, decs, scaling=scaling)
 
 
-def get_quantities_in_a_brick(ramin, ramax, decmin, decmax, brickname, drdir,
-                              density=100000, dustdir=None):
+def get_quantities_in_a_brick(ramin, ramax, decmin, decmax, brickname, density=100000,
+                              drdir="/global/project/projectdirs/cosmo/data/legacysurvey/dr4/",
+                              dustdir=None):
     """NOBS, DEPTHS etc. (per-band) for random points in a brick of the Legacy Surveys
 
     Parameters
@@ -458,12 +393,12 @@ def get_quantities_in_a_brick(ramin, ramax, decmin, decmax, brickname, drdir,
         The maximum "edge" of the brick in Declination
     brickname : :class:`~numpy.array`
         Brick names that corresponnds to the brick edges, e.g., '1351p320'
-    drdir : :class:`str`
-       The root directory pointing to a Data Release from the Legacy Surveys
-       e.g. /global/project/projectdirs/cosmo/data/legacysurvey/dr7.
     density : :class:`int`, optional, defaults to 100,000
         The number of random points to return per sq. deg. As a typical brick is
         ~0.25 x 0.25 sq. deg. about (0.0625*density) points will be returned
+    drdir : :class:`str`, optional, defaults to the DR4 root directory at NERSC
+        The root directory pointing to a Data Release of the Legacy Surveys, e.g.:
+        "/global/project/projectdirs/cosmo/data/legacysurvey/dr4/"
     dustdir : :class:`str`, optional, defaults to $DUST_DIR+'/maps'
         The root directory pointing to SFD dust maps. If not
         sent the code will try to use $DUST_DIR+'/maps' before failing.
@@ -488,37 +423,37 @@ def get_quantities_in_a_brick(ramin, ramax, decmin, decmax, brickname, drdir,
               dr7dir + 'coadd/111/1116p210/legacysurvey-1116p210-maskbits.fits.gz'
             EBV: E(B-V) at this location from the SFD dust maps
     """
-    # ADM this is only intended to work on one brick, so die if a larger array is passed.
+    # ADM this is only intended to work on one brick, so die if a larger array is passed
     if not isinstance(brickname, str):
         log.fatal("Only one brick can be passed at a time!")
         raise ValueError
 
-    # ADM generate random points within the brick at the requested density.
+    # ADM generate random points within the brick at the requested density
     ras, decs = randoms_in_a_brick_from_edges(ramin, ramax, decmin, decmax, density=density)
 
-    # ADM retrieve the dictionary of quantities for each random point.
-    qdict = dr8_quantities_at_positions_in_a_brick(ras, decs, brickname, drdir)
+    # ADM retrieve the dictionary of quantities for each random point
+    qdict = quantities_at_positions_in_a_brick(ras, decs, brickname, drdir=drdir)
 
-    # ADM retrieve the E(B-V) values for each random point.
+    # ADM retrieve the E(B-V) values for each random point
     ebv = get_dust(ras, decs, dustdir=dustdir)
 
-    # ADM convert the dictionary to a structured array.
+    # ADM convert the dictionary to a structured array
     qinfo = np.zeros(len(ras),
                      dtype=[('RA', 'f8'), ('DEC', 'f8'), ('BRICKNAME', 'S8'),
                             ('NOBS_G', 'i2'), ('NOBS_R', 'i2'), ('NOBS_Z', 'i2'),
                             ('PSFDEPTH_G', 'f4'), ('PSFDEPTH_R', 'f4'), ('PSFDEPTH_Z', 'f4'),
                             ('GALDEPTH_G', 'f4'), ('GALDEPTH_R', 'f4'), ('GALDEPTH_Z', 'f4'),
-                            ('MASKBITS', 'i2'), ('EBV', 'f4'), ('PHOTSYS', '|S1')])
+                            ('MASKBITS', 'i2'), ('EBV', 'f4')])
     # ADM store each quantity of interest in the structured array
-    # ADM remembering that the dictionary keys are in lower case text.
+    # ADM remembering that the dictionary keys are in lower case text
     cols = qdict.keys()
     for col in cols:
         qinfo[col.upper()] = qdict[col]
 
-    # ADM add the RAs/Decs and brick name.
+    # ADM add the RAs/Decs and brick name
     qinfo["RA"], qinfo["DEC"], qinfo["BRICKNAME"] = ras, decs, brickname
 
-    # ADM add the dust values.
+    # ADM add the dust values
     qinfo["EBV"] = ebv
 
     return qinfo
@@ -836,16 +771,147 @@ def pixmap(randoms, targets, rand_density, nside=256, gaialoc=None):
     return hpxinfo
 
 
-def select_randoms(drdir, density=100000, numproc=32, nside=4, pixlist=None,
+def bundle_bricks(pixnum, maxpernode, nside, brickspersec=2.5,
+                  surveydir="/global/project/projectdirs/cosmo/data/legacysurvey/dr6"):
+    """Determine the optimal packing for bricks collected by HEALpixel integer
+
+    Parameters
+    ----------
+    pixnum : :class:`np.array`
+        List of integers, e.g., HEALPixel numbers occupied by a set of bricks
+        (e.g. array([16, 16, 16...12 , 13, 19]) ).
+    maxpernode : :class:`int`
+        The maximum number of pixels to bundle together (e.g., if you were
+        trying to pass maxpernode bricks, delineated by the HEALPixels they
+        occupy, parallelized across a set of nodes).
+    nside : :class:`int`
+        The HEALPixel nside number that was used to generate `pixnum` (NESTED scheme).
+    brickspersec : :class:`float`, optional, defaults to 2.5
+        The rough number of bricks processed per second by the code (parallelized across
+        a chosen number of nodes)
+    surveydir : :class:`str`, optional, defaults to the DR6 directory at NERSC
+        The root directory pointing to a Data Release from the Legacy Surveys,
+        (e.g. "/global/project/projectdirs/cosmo/data/legacysurvey/dr6").
+
+    Returns
+    -------
+    Nothing, but prints commands to screen that would facilitate running a
+    set of bricks by HEALPixel integer with the total number of bricks not
+    to exceed maxpernode. Also prints how many bricks would be on each node.
+
+    Notes
+    -----
+    h/t https://stackoverflow.com/questions/7392143/python-implementations-of-packing-algorithm
+    """
+    # ADM the number of pixels (numpix) in each pixel (pix)
+    pix, numpix = np.unique(pixnum, return_counts=True)
+
+    # ADM the indices needed to reverse-sort the array on number of pixels
+    reverse_order = np.flipud(np.argsort(numpix))
+    numpix = numpix[reverse_order]
+    pix = pix[reverse_order]
+
+    # ADM iteratively populate lists of the numbers of pixels
+    # ADM and the corrsponding pixel numbers
+    bins = []
+
+    for index, num in enumerate(numpix):
+        # Try to fit this sized number into a bin
+        for bin in bins:
+            if np.sum(np.array(bin)[:, 0]) + num <= maxpernode:
+                # print 'Adding', item, 'to', bin
+                bin.append([num, pix[index]])
+                break
+        else:
+            # item didn't fit into any bin, start a new bin
+            bin = []
+            bin.append([num, pix[index]])
+            bins.append(bin)
+
+    # ADM print to screen in the form of a slurm bash script, and
+    # ADM other useful information
+    print("#######################################################")
+    print("Numbers of bricks in each set of healpixels:")
+    print("")
+    # ADM margin of 30 minutes for writing to disk
+    margin = 30./60
+    maxeta = 0
+    for bin in bins:
+        num = np.array(bin)[:, 0]
+        pix = np.array(bin)[:, 1]
+        wpix = np.where(num > 0)[0]
+        if len(wpix) > 0:
+            goodpix, goodnum = pix[wpix], num[wpix]
+            sorter = goodpix.argsort()
+            goodpix, goodnum = goodpix[sorter], goodnum[sorter]
+            outnote = ['{}: {}'.format(pix, num) for pix, num in zip(goodpix, goodnum)]
+            # ADM add the total across all of the pixels
+            outnote.append('Total: {}'.format(np.sum(goodnum)))
+            # ADM a crude estimate of how long the script will take to run
+            # ADM brickspersec is bricks/sec. Extra delta is minutes to write to disk
+            delta = 3./60.
+            eta = delta + np.sum(goodnum)/brickspersec/3600
+            outnote.append('Estimated time to run in hours (for 32 processors per node): {:.2f}h'
+                           .format(eta))
+            # ADM track the maximum estimated time for shell scripts, etc.
+            if (eta+margin).astype(int) + 1 > maxeta:
+                maxeta = (eta+margin).astype(int) + 1
+            print(outnote)
+
+    print("")
+    print('Estimated additional margin for writing to disk in hours: {:.2f}h'.format(margin))
+
+    print("")
+    print("#######################################################")
+    print("Possible salloc command if you want to run on the interactive queue:")
+    print("")
+    print("salloc -N {} -C haswell -t 0{}:00:00 --qos interactive -L SCRATCH,project"
+          .format(len(bins), maxeta))
+
+    print("")
+    print("#######################################################")
+    print('Example shell script for slurm:')
+    print('')
+    print('#!/bin/bash -l')
+    print('#SBATCH -q regular')
+    print('#SBATCH -N {}'.format(len(bins)))
+    print('#SBATCH -t 0{}:00:00'.format(maxeta))
+    print('#SBATCH -L SCRATCH,project')
+    print('#SBATCH -C haswell')
+    print('')
+
+    # ADM extract the Data Release number from the survey directory
+    dr = surveydir.split('dr')[-1][0]
+
+    outfiles = []
+    for bin in bins:
+        num = np.array(bin)[:, 0]
+        pix = np.array(bin)[:, 1]
+        wpix = np.where(num > 0)[0]
+        if len(wpix) > 0:
+            goodpix = pix[wpix]
+            goodpix.sort()
+            strgoodpix = ",".join([str(pix) for pix in goodpix])
+            outfile = "$CSCRATCH/randoms-dr{}-hp-{}.fits".format(dr, strgoodpix)
+            outfiles.append(outfile)
+            print("srun -N 1 select_randoms {} {} --numproc 32 --nside {} --healpixels {} &"
+                  .format(surveydir, outfile, nside, strgoodpix))
+    print("wait")
+    print("")
+    print("gather_targets '{}' $CSCRATCH/randoms-dr{}.fits randoms".format(";".join(outfiles), dr))
+    print("")
+
+    return
+
+
+def select_randoms(density=100000, numproc=32, nside=4, pixlist=None,
                    bundlebricks=None, brickspersec=2.5,
+                   drdir="/global/project/projectdirs/cosmo/data/legacysurvey/dr4/",
                    dustdir=None):
     """NOBS, GALDEPTH, PSFDEPTH (per-band) for random points in a DR of the Legacy Surveys
 
     Parameters
     ----------
-    drdir : :class:`str`
-       The root directory pointing to a Data Release from the Legacy Surveys
-       e.g. /global/project/projectdirs/cosmo/data/legacysurvey/dr7.
     density : :class:`int`, optional, defaults to 100,000
         The number of random points to return per sq. deg. As a typical brick is
         ~0.25 x 0.25 sq. deg. about (0.0625*density) points will be returned
@@ -870,6 +936,8 @@ def select_randoms(drdir, density=100000, numproc=32, nside=4, pixlist=None,
         The rough number of bricks processed per second by the code (parallelized across
         a chosen number of nodes). Used in conjunction with `bundlebricks` for the code
         to estimate time to completion when parallelizing across pixels.
+    drdir : :class:`str`, optional, defaults to dr4 root directory on NERSC
+       The root directory pointing to a Data Release from the Legacy Surveys.
     dustdir : :class:`str`, optional, defaults to $DUST_DIR+'maps'
         The root directory pointing to SFD dust maps. If not
         sent the code will try to use $DUST_DIR+'maps')
@@ -895,48 +963,28 @@ def select_randoms(drdir, density=100000, numproc=32, nside=4, pixlist=None,
               dr7dir + 'coadd/111/1116p210/legacysurvey-1116p210-maskbits.fits.gz'
             EBV: E(B-V) at this location from the SFD dust maps
     """
-    # ADM read in the survey bricks file, which lists the bricks of interest for this DR.
-    # ADM if this is pre-or-post-DR8 we need to find the correct directory or directories.
-    drdirs = _pre_or_post_dr8(drdir)
-    bricknames = []
-    brickinfo = []
-    for dd in drdirs:
-        sbfile = glob(dd+'/*bricks-dr*')
-        if len(sbfile) > 0:
-            sbfile = sbfile[0]
-            hdu = fits.open(sbfile)
-            brickinfo.append(hdu[1].data)
-            bricknames.append(hdu[1].data['BRICKNAME'])
-        else:
-            # ADM this is a hack for test bricks where we didn't always generate the
-            # ADM bricks file. It's probably safe to remove it at some point.
-            from desitarget.io import brickname_from_filename
-            fns = glob(os.path.join(dd, 'tractor', '*', '*fits'))
-            bricknames.append([brickname_from_filename(fn) for fn in fns])
-            brickinfo.append([])
-            if pixlist is not None or bundlebricks is not None:
-                msg = 'DR-specific bricks file not found'
-                msg += 'and pixlist or bundlebricks passed!!!'
-                log.critical(msg)
-                raise ValueError(msg)
-    bricknames = np.concatenate(bricknames)
-    brickinfo = np.concatenate(brickinfo)
+    # ADM read in the survey bricks file, which lists the bricks of interest for this DR
+    from glob import glob
+    sbfile = glob(drdir+'/*bricks-dr*')[0]
+    hdu = fits.open(sbfile)
+    brickinfo = hdu[1].data
+    bricknames = brickinfo['brickname']
 
     # ADM if the pixlist or bundlebricks option was sent, we'll need the HEALPixel
-    # ADM information for each brick.
+    # ADM information for each brick
     if pixlist is not None or bundlebricks is not None:
         theta, phi = np.radians(90-brickinfo["dec"]), np.radians(brickinfo["ra"])
         pixnum = hp.ang2pix(nside, theta, phi, nest=True)
 
-    # ADM if the bundlebricks option was sent, call the packing code.
+    # ADM if the bundlebricks option was sent, call the packing code
     if bundlebricks is not None:
-        bundle_bricks(pixnum, bundlebricks, nside, brickspersec=brickspersec,
-                      prefix='randoms', surveydir=drdir)
+        bundle_bricks(pixnum, bundlebricks, nside,
+                      brickspersec=brickspersec, surveydir=drdir)
         return
 
-    # ADM restrict to only bricks in a set of HEALPixels, if requested.
+    # ADM restrict to only bricks in a set of HEALPixels, if requested
     if pixlist is not None:
-        # ADM if an integer was passed, turn it into a list.
+        # ADM if an integer was passed, turn it into a list
         if isinstance(pixlist, int):
             pixlist = [pixlist]
         wbricks = np.where([pix in pixlist for pix in pixnum])[0]
@@ -950,16 +998,16 @@ def select_randoms(drdir, density=100000, numproc=32, nside=4, pixlist=None,
     log.info('Processing {} bricks from DR at {} at density {:.1e} per sq. deg...t = {:.1f}s'
              .format(nbricks, drdir, density, time()-start))
 
-    # ADM a little more information if we're slurming across nodes.
+    # ADM a little more information if we're slurming across nodes
     if os.getenv('SLURMD_NODENAME') is not None:
         log.info('Running on Node {}'.format(os.getenv('SLURMD_NODENAME')))
 
     # ADM initialize the bricks class, and retrieve the brick information look-up table
-    # ADM so it can be used in a common fashion.
+    # ADM so it can be used in a common fashion
     from desiutil import brick
     bricktable = brick.Bricks(bricksize=0.25).to_table()
 
-    # ADM the critical function to run on every brick.
+    # ADM the critical function to run on every brick
     def _get_quantities(brickname):
         '''wrapper on nobs_positions_in_a_brick_from_edges() given a brick name'''
         # ADM retrieve the edges for the brick that we're working on
@@ -967,9 +1015,9 @@ def select_randoms(drdir, density=100000, numproc=32, nside=4, pixlist=None,
         ramin, ramax, decmin, decmax = np.array(bricktable[wbrick]["RA1", "RA2", "DEC1", "DEC2"])[0]
 
         # ADM populate the brick with random points, and retrieve the quantities
-        # ADM of interest at those points.
-        return get_quantities_in_a_brick(ramin, ramax, decmin, decmax, brickname, drdir,
-                                         density=density, dustdir=dustdir)
+        # ADM of interest at those points
+        return get_quantities_in_a_brick(ramin, ramax, decmin, decmax, brickname,
+                                         density=density, drdir=drdir, dustdir=dustdir)
 
     # ADM this is just to count bricks in _update_status
     nbrick = np.zeros((), dtype='i8')
@@ -999,13 +1047,6 @@ def select_randoms(drdir, density=100000, numproc=32, nside=4, pixlist=None,
         for brickname in bricknames:
             qinfo.append(_update_status(_get_quantities(brickname)))
 
-    # ADM concatenate the randoms into a single long list and resolve whether
-    # ADM they are officially in the north or the south.
     qinfo = np.concatenate(qinfo)
-    qinfo = resolve(qinfo)
-
-    # ADM one last shuffle to randomize across brick boundaries.
-    np.random.seed(616)
-    np.random.shuffle(qinfo)
 
     return qinfo

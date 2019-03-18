@@ -5,7 +5,6 @@ omit =
    py/desitarget/conftest*
    py/desitarget/cython_version*
    py/desitarget/mock/mockmaker.py
-   py/desitarget/mock/build.py
    py/desitarget/setup_package*
    py/desitarget/*/setup_package*
    py/desitarget/*/*/setup_package*

@@ -17,42 +17,32 @@ nside = 64 #ADM default HEALPix Nside used throughout desitarget
 
 from argparse import ArgumentParser
 ap = ArgumentParser(description='Generates a file of GFA (Guide/Focus/Alignment) targets via matching to Gaia')
-ap.add_argument("surveydir",
+ap.add_argument("surveydir", 
                 help="Base directory for a Legacy Surveys Data Release (e.g. '/global/project/projectdirs/cosmo/data/legacysurvey/dr6/' at NERSC)")
-ap.add_argument("dest",
+ap.add_argument("dest", 
                 help="Output GFA targets file (e.g. '/project/projectdirs/desi/target/catalogs/gfas-dr6-0.20.0.fits' at NERSC)")
-ap.add_argument('-m', '--maglim', type=float,
+ap.add_argument('-m', '--maglim', type=float, 
                 help='Magnitude limit on GFA targets in Gaia G-band (defaults to [18])',
                 default=18)
+ap.add_argument("--gaiamatch", action='store_true',
+                help="DO match to Gaia DR2 chunks files in order to populate Gaia columns for the GFA locations")
 ap.add_argument('-n', "--numproc", type=int,
                 help='number of concurrent processes to use (defaults to [{}])'.format(nproc),
                 default=nproc)
-ap.add_argument('-s2', "--surveydir2",
-                help='Additional Legacy Surveys Data Release directory (useful for combining, e.g., DR8 into one file of GFAs)',
-                default=None)
 
 ns = ap.parse_args()
 
 infiles = io.list_sweepfiles(ns.surveydir)
-indir = ns.surveydir
-if ns.surveydir2 is not None:
-    infiles2 = io.list_sweepfiles(ns.surveydir2)
-    infiles += infiles2
-    indir = "{} {}".format(ns.surveydir, ns.surveydir2)
 if len(infiles) == 0:
     infiles = io.list_tractorfiles(ns.surveydir)
-    if ns.surveydir2 is not None:
-        infiles2 = io.list_tractorfiles(ns.surveydir2)
-        infiles += infiles2
-        indir = "{} {}".format(ns.surveydir, ns.surveydir2)
 if len(infiles) == 0:
     log.critical('no sweep or tractor files found')
     sys.exit(1)
 
 log.info('running on {} processors...t={:.1f}mins'.format(ns.numproc, (time()-time0)/60.))
 
-gfas = select_gfas(infiles, maglim=ns.maglim, numproc=ns.numproc)
+gfas = select_gfas(infiles, maglim=ns.maglim, numproc=ns.numproc, gaiamatch=ns.gaiamatch)
 
-io.write_gfas(ns.dest, gfas, indir=indir, nside=nside, survey='main')
+io.write_gfas(ns.dest, gfas, indir=ns.surveydir, nside=nside)
 
 log.info('{} GFAs written to {}...t={:.1f}mins'.format(len(gfas), ns.dest, (time()-time0)/60.))

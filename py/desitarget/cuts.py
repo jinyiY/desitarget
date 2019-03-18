@@ -19,7 +19,6 @@ import numbers
 import sys
 
 import numpy as np
-import healpy as hp
 from pkg_resources import resource_filename
 
 from astropy.table import Table, Row
@@ -28,10 +27,7 @@ from desitarget import io
 from desitarget.internal import sharedmem
 from desitarget.gaiamatch import match_gaia_to_primary
 from desitarget.gaiamatch import pop_gaia_coords, pop_gaia_columns
-from desitarget.targets import finalize, resolve
-from desitarget.geomask import bundle_bricks, pixarea2nside, check_nside
-from desitarget.geomask import box_area, hp_in_box, is_in_box, is_in_hp
-from desitarget.geomask import cap_area, hp_in_cap, is_in_cap
+from desitarget.targets import finalize
 
 # ADM set up the DESI default logger
 from desiutil.log import get_logger
@@ -879,17 +875,6 @@ def _check_BGS_targtype(targtype):
         raise ValueError(msg)
 
 
-def _check_BGS_targtype_sv(targtype):
-    """Fail if `targtype` is not one of the strings 'bright', 'faint', 'faint_ext', 'lowq' or 'fibmag'.
-    """
-    targposs = ['faint', 'bright', 'faint_ext', 'lowq', 'fibmag']
-
-    if targtype not in targposs:
-        msg = 'targtype must be one of {} not {}'.format(targposs, targtype)
-        log.critical(msg)
-        raise ValueError(msg)
-
-
 def isBGS(gflux=None, rflux=None, zflux=None, w1flux=None, w2flux=None,
           gnobs=None, rnobs=None, znobs=None, gfracmasked=None, rfracmasked=None, zfracmasked=None,
           gfracflux=None, rfracflux=None, zfracflux=None, gfracin=None, rfracin=None, zfracin=None,
@@ -1233,7 +1218,7 @@ def isQSO_randomforest_north(gflux=None, rflux=None, zflux=None, w1flux=None, w2
                 (tmp_rf_proba >= pcut) | (tmp_rf_HighZ_proba >= pcut_HighZ)
 
     # In case of call for a single object passed to the function with scalar arguments
-    # Return "numpy.bool_" instead of "~numpy.ndarray"
+    # Return "numpy.bool_" instead of "numpy.ndarray"
     if nbEntries == 1:
         qso = qso[0]
 
@@ -1340,7 +1325,7 @@ def isQSO_randomforest_south(gflux=None, rflux=None, zflux=None, w1flux=None, w2
                 (tmp_rf_proba >= pcut) | (tmp_rf_HighZ_proba >= pcut_HighZ)
 
     # In case of call for a single object passed to the function with scalar arguments
-    # Return "numpy.bool_" instead of "~numpy.ndarray"
+    # Return "numpy.bool_" instead of "numpy.ndarray"
     if nbEntries == 1:
         qso = qso[0]
 
@@ -1478,7 +1463,6 @@ def _prepare_optical_wise(objects, colnames=None):
     zflux = flux['ZFLUX']
     w1flux = flux['W1FLUX']
     w2flux = flux['W2FLUX']
-    rfiberflux = flux['RFIBERFLUX']
     objtype = objects['TYPE']
     release = objects['RELEASE']
 
@@ -1512,21 +1496,21 @@ def _prepare_optical_wise(objects, colnames=None):
     w1snr = objects['FLUX_W1'] * np.sqrt(objects['FLUX_IVAR_W1'])
     w2snr = objects['FLUX_W2'] * np.sqrt(objects['FLUX_IVAR_W2'])
 
-    # For BGS target selection.
-    brightstarinblob = (objects['BRIGHTBLOB'] & 2**0) != 0
+    # For BGS target selection
+    brightstarinblob = objects['BRIGHTSTARINBLOB']
 
     # Delta chi2 between PSF and SIMP morphologies; note the sign....
     dchisq = objects['DCHISQ']
     deltaChi2 = dchisq[..., 0] - dchisq[..., 1]
 
-    # ADM remove handful of NaN values from DCHISQ values and make them unselectable.
+    # ADM remove handful of NaN values from DCHISQ values and make them unselectable
     w = np.where(deltaChi2 != deltaChi2)
-    # ADM this is to catch the single-object case for unit tests.
+    # ADM this is to catch the single-object case for unit tests
     if len(w[0]) > 0:
         deltaChi2[w] = -1e6
 
     return (photsys_north, photsys_south, obs_rflux, gflux, rflux, zflux,
-            w1flux, w2flux, rfiberflux, objtype, release, gfluxivar, rfluxivar, zfluxivar,
+            w1flux, w2flux, objtype, release, gfluxivar, rfluxivar, zfluxivar,
             gnobs, rnobs, znobs, gfracflux, rfracflux, zfracflux,
             gfracmasked, rfracmasked, zfracmasked,
             gfracin, rfracin, zfracin, gallmask, rallmask, zallmask,
@@ -1563,11 +1547,7 @@ def _prepare_gaia(objects, colnames=None):
     gaiabmag = objects['GAIA_PHOT_BP_MEAN_MAG']
     gaiarmag = objects['GAIA_PHOT_RP_MEAN_MAG']
     gaiaaen = objects['GAIA_ASTROMETRIC_EXCESS_NOISE']
-    # ADM a mild hack, as GAIA_DUPLICATED_SOURCE was a 0/1 integer at some point.
     gaiadupsource = objects['GAIA_DUPLICATED_SOURCE']
-    if issubclass(gaiadupsource.dtype.type, np.integer):
-        if len(set(np.atleast_1d(gaiadupsource)) - set([0, 1])) == 0:
-            gaiadupsource = objects['GAIA_DUPLICATED_SOURCE'].astype(bool)
 
     # For BGS target selection
     Grr = gaiagmag - 22.5 + 2.5*np.log10(objects['FLUX_R'])
@@ -1619,7 +1599,7 @@ def unextinct_fluxes(objects):
     Output type is Table if input is Table, otherwise numpy structured array
     """
     dtype = [('GFLUX', 'f4'), ('RFLUX', 'f4'), ('ZFLUX', 'f4'),
-             ('W1FLUX', 'f4'), ('W2FLUX', 'f4'), ('RFIBERFLUX', 'f4')]
+             ('W1FLUX', 'f4'), ('W2FLUX', 'f4')]
     if _is_row(objects):
         result = np.zeros(1, dtype=dtype)[0]
     else:
@@ -1630,7 +1610,6 @@ def unextinct_fluxes(objects):
     result['ZFLUX'] = objects['FLUX_Z'] / objects['MW_TRANSMISSION_Z']
     result['W1FLUX'] = objects['FLUX_W1'] / objects['MW_TRANSMISSION_W1']
     result['W2FLUX'] = objects['FLUX_W2'] / objects['MW_TRANSMISSION_W2']
-    result['RFIBERFLUX'] = objects['FIBERFLUX_R'] / objects['MW_TRANSMISSION_R']
 
     if isinstance(objects, Table):
         return Table(result)
@@ -1639,7 +1618,7 @@ def unextinct_fluxes(objects):
 
 
 def set_target_bits(photsys_north, photsys_south, obs_rflux,
-                    gflux, rflux, zflux, w1flux, w2flux, rfiberflux,
+                    gflux, rflux, zflux, w1flux, w2flux,
                     objtype, release, gfluxivar, rfluxivar, zfluxivar,
                     gnobs, rnobs, znobs, gfracflux, rfracflux, zfracflux,
                     gfracmasked, rfracmasked, zfracmasked,
@@ -1661,10 +1640,6 @@ def set_target_bits(photsys_north, photsys_south, obs_rflux,
         `rflux` but WITHOUT any Galactic extinction correction.
     gflux, rflux, zflux, w1flux, w2flux : :class:`~numpy.ndarray`
         The flux in nano-maggies of g, r, z, W1 and W2 bands.
-        Corrected for Galactic extinction.
-    rfiberflux : :class:`~numpy.ndarray`
-        Predicted fiber flux in 1 arcsecond seeing in r-band.
-        Corrected for Galactic extinction.
     objtype, release : :class:`~numpy.ndarray`
         `The Legacy Surveys`_ imaging ``TYPE`` and ``RELEASE`` columns.
     gfluxivar, rfluxivar, zfluxivar: :class:`~numpy.ndarray`
@@ -2065,12 +2040,12 @@ def apply_cuts(objects, qso_selection='randomforest', gaiamatch=False,
     colnames = _get_colnames(objects)
 
     # ADM process the Legacy Surveys columns for Target Selection.
-    photsys_north, photsys_south, obs_rflux, gflux, rflux, zflux,                      \
-        w1flux, w2flux, rfiberflux, objtype, release, gfluxivar, rfluxivar, zfluxivar, \
-        gnobs, rnobs, znobs, gfracflux, rfracflux, zfracflux,                          \
-        gfracmasked, rfracmasked, zfracmasked,                                         \
-        gfracin, rfracin, zfracin, gallmask, rallmask, zallmask,                       \
-        gsnr, rsnr, zsnr, w1snr, w2snr, dchisq, deltaChi2, brightstarinblob =          \
+    photsys_north, photsys_south, obs_rflux, gflux, rflux, zflux,              \
+        w1flux, w2flux, objtype, release, gfluxivar, rfluxivar, zfluxivar,     \
+        gnobs, rnobs, znobs, gfracflux, rfracflux, zfracflux,                  \
+        gfracmasked, rfracmasked, zfracmasked,                                 \
+        gfracin, rfracin, zfracin, gallmask, rallmask, zallmask,               \
+        gsnr, rsnr, zsnr, w1snr, w2snr, dchisq, deltaChi2, brightstarinblob =  \
         _prepare_optical_wise(objects, colnames=colnames)
 
     # Process the Gaia inputs for target selection.
@@ -2098,7 +2073,7 @@ def apply_cuts(objects, qso_selection='randomforest', gaiamatch=False,
 
     desi_target, bgs_target, mws_target = targcuts.set_target_bits(
         photsys_north, photsys_south, obs_rflux,
-        gflux, rflux, zflux, w1flux, w2flux, rfiberflux,
+        gflux, rflux, zflux, w1flux, w2flux,
         objtype, release, gfluxivar, rfluxivar, zfluxivar,
         gnobs, rnobs, znobs, gfracflux, rfracflux, zfracflux,
         gfracmasked, rfracmasked, zfracmasked,
@@ -2234,8 +2209,6 @@ Method_sandbox_options = ['XD', 'RF_photo', 'RF_spectro']
 
 def select_targets(infiles, numproc=4, qso_selection='randomforest',
                    gaiamatch=False, sandbox=False, FoMthresh=None, Method=None,
-                   nside=None, pixlist=None, bundlefiles=None, filespersec=0.12,
-                   radecbox=None, radecrad=None,
                    tcnames=["ELG", "QSO", "LRG", "MWS", "BGS", "STD"],
                    survey='main'):
     """Process input files in parallel to select targets.
@@ -2260,28 +2233,6 @@ def select_targets(infiles, numproc=4, qso_selection='randomforest',
         in the sandbox directory.
     Method : :class:`str`, optional, defaults to `None`
         Method used in the sandbox.
-    nside : :class:`int`, optional, defaults to `None`
-        The (NESTED) HEALPixel nside to be used with the `pixlist` and `bundlefiles` inputs.
-    pixlist : :class:`list` or `int`, optional, defaults to `None`
-        Only return targets in a set of (NESTED) HEALpixels at the supplied `nside`.
-        Also useful for parallelizing as input files will only be processed if they
-        touch a pixel in the passed list.
-    bundlefiles : :class:`int`, defaults to `None`
-        If not `None`, then instead of selecting the skies, print, to screen, the slurm
-        script that will approximately balance the input file distribution at `bundlefiles`
-        files per node. So, for instance, if `bundlefiles` is 100 then commands would be
-        returned with the correct `pixlist` values set to pass to the code to pack at
-        about 100 files per node across all of the passed `infiles`.
-    filespersec : :class:`float`, optional, defaults to 1
-        The rough number of files processed per second by the code (parallelized across
-        a chosen number of nodes). Used in conjunction with `bundlefiles` for the code
-        to estimate time to completion when parallelizing across pixels.
-    radecbox : :class:`list`, defaults to `None`
-        4-entry list of coordinates [ramin, ramax, decmin, decmax] forming the edges
-        of a box in RA/Dec (degrees). Only targets in this box region will be processed.
-    radecrad : :class:`list`, defaults to `None`
-        3-entry list of coordinates [ra, dec, radius] forming a "circle" on the sky. For
-        RA/Dec/radius in degrees. Only targets in this circle region will be processed.
     tcnames : :class:`list`, defaults to running all target classes
         A list of strings, e.g. ['QSO','LRG']. If passed, process targeting only
         for those specific target classes. A useful speed-up when testing.
@@ -2301,90 +2252,22 @@ def select_targets(infiles, numproc=4, qso_selection='randomforest',
     Notes
     -----
         - if numproc==1, use serial code instead of parallel.
-        - only one of pixlist, radecbox, radecrad should be passed. They are all
-          intended to denote regions on the sky, using different formalisms.
     """
     from desiutil.log import get_logger
     log = get_logger()
 
     log.info("Running on the {} survey".format(survey))
 
-    # - Convert single file to list of files.
+    # - Convert single file to list of files
     if isinstance(infiles, str):
         infiles = [infiles, ]
 
-    # - Sanity check that files exist before going further.
+    # - Sanity check that files exist before going further
     for filename in infiles:
         if not os.path.exists(filename):
             msg = "{} doesn't exist".format(filename)
             log.critical(msg)
             raise ValueError(msg)
-
-    # ADM check that only one of pixlist, radecrad, radecbox was sent.
-    inputs = [ins for ins in (pixlist, radecbox, radecrad) if ins is not None]
-    if len(inputs) > 1:
-        msg = "Only one of pixist, radecbox or radecrad can be passed"
-        log.critical(msg)
-        raise ValueError(msg)
-
-    # ADM if radecbox was sent, determine which pixels touch the box.
-    if radecbox is not None:
-        nside = pixarea2nside(box_area(radecbox))
-        pixlist = hp_in_box(nside, radecbox)
-        log.info("Run targets in box bounded by [RAmin, RAmax, Decmin, Decmax]={}"
-                 .format(radecbox))
-
-    # ADM if radecrad was sent, determine which pixels touch the box.
-    if radecrad is not None:
-        nside = pixarea2nside(cap_area(np.array(radecrad[2])))
-        pixlist = hp_in_cap(nside, radecrad)
-        log.info("Run targets in cap bounded by [centerRA, centerDec, radius]={}"
-                 .format(radecrad))
-
-    # ADM if the pixlist or bundlefiles option was sent, we'll need to know
-    # ADM which HEALPixels touch each file.
-    if pixlist is not None or bundlefiles is not None:
-        # ADM work with pixlist as an array.
-        pixlist = np.atleast_1d(pixlist)
-        # ADM sanity check that nside is OK.
-        check_nside(nside)
-        # ADM a list of HEALPixels that touch each file.
-        # ADM this will break for Tractor files!!!
-        pixelsperfile = [io.decode_sweep_name(file, nside=nside) for file in infiles]
-        # ADM a flattened array of all HEALPixels touched by the input
-        # ADM files. Each HEALPixel can appear multiple times if it's
-        # ADM touched by multiple input sweep files.
-        pixnum = np.hstack(pixelsperfile)
-        # ADM restrict input pixels to only those that touch an input file.
-        ii = [pix in pixnum for pix in pixlist]
-        pixlist = pixlist[ii]
-        # ADM create a list of files that touch each HEALPixel.
-        filesperpixel = [[] for pix in range(np.max(pixnum)+1)]
-        for ifile, pixels in enumerate(pixelsperfile):
-            for pix in pixels:
-                filesperpixel[pix].append(infiles[ifile])
-
-    # ADM if the bundlefiles option was sent, call the packing code.
-    if bundlefiles is not None:
-        prefix = "targets"
-        if survey != "main":
-            prefix = "{}_targets".format(survey)
-        bundle_bricks(pixnum, bundlefiles, nside,
-                      brickspersec=filespersec, gather=False,
-                      prefix=prefix, surveydir=os.path.dirname(infiles[0]))
-        return
-
-    # ADM restrict to only input files in a set of HEALPixels, if requested.
-    if pixlist is not None:
-        infiles = list(set(np.hstack([filesperpixel[pix] for pix in pixlist])))
-        if len(infiles) == 0:
-            log.warning('ZERO files in passed pixel list!!!')
-        log.info("Processing files in (nside={}, pixel numbers={}) HEALPixels"
-                 .format(nside, pixlist))
-
-    # ADM a little more information if we're slurming across nodes.
-    if os.getenv('SLURMD_NODENAME') is not None:
-        log.info('Running on Node {}'.format(os.getenv('SLURMD_NODENAME')))
 
     def _finalize_targets(objects, desi_target, bgs_target, mws_target):
         # - desi_target includes BGS_ANY and MWS_ANY, so we can filter just
@@ -2398,8 +2281,6 @@ def select_targets(infiles, numproc=4, qso_selection='randomforest',
         # - Add *_target mask columns
         targets = finalize(objects, desi_target, bgs_target, mws_target,
                            survey=survey)
-        # ADM resolve any duplicates between imaging data releases.
-        targets = resolve(targets)
 
         return targets
 
@@ -2458,27 +2339,6 @@ def select_targets(infiles, numproc=4, qso_selection='randomforest',
             for x in infiles:
                 targets.append(_update_status(_select_targets_file(x)))
 
-    # ADM it's possible that somebody could pass an arangment of HEALPixels
-    # ADM that contain no targets, in which case exit (somewhat) gracefully.
-    if targets == []:
-        log.warning('ZERO targets for passed file list or region!!!')
-        return targets
-
     targets = np.concatenate(targets)
-
-    # ADM restrict to only targets in a set of HEALPixels, if requested.
-    if pixlist is not None:
-        ii = is_in_hp(targets, nside, pixlist)
-        targets = targets[ii]
-
-    # ADM restrict to only targets in an RA, Dec box, if requested.
-    if radecbox is not None:
-        ii = is_in_box(targets, radecbox)
-        targets = targets[ii]
-
-    # ADM restrict to only targets in an RA, Dec, radius cap, if requested.
-    if radecrad is not None:
-        ii = is_in_cap(targets, radecrad)
-        targets = targets[ii]
 
     return targets

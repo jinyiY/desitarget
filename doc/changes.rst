@@ -2,38 +2,9 @@
 desitarget Change Log
 =====================
 
-0.28.1 (unreleased)
+0.27.1 (unreleased)
 -------------------
 
-* New resolve capability for post-DR7 imaging [`PR #462`_]. Includes:
-    * Add ``RELEASE`` to GFA data model to help resolve duplicates.
-    * Resolve N/S duplicates by combining ``RELEASE`` and areal cuts.
-    * Apply the new resolve code (:func:`targets.resolve`) to GFAs.
-    * Deprecate Gaia-matching code for GFAs, as we no longer need it.
-* Add code to select GFAs for cmx across wider sky areas [`PR #461`_].
-
-.. _`PR #461`: https://github.com/desihub/desitarget/pull/461
-.. _`PR #462`: https://github.com/desihub/desitarget/pull/462
-
-0.28.0 (2019-02-28)
--------------------
-
-* `desitarget.mock.build.targets_truth` fixes for new priority calcs [`PR #460`_].
-* Updates to GFAs and skies for some cmx issues [`PR #459`_]. Includes:
-    * Assign ``BADSKY`` using ``BLOBDIST`` rather than aperture fluxes.
-    * Increase default density at which sky locations are generated.
-    * Store only aperture fluxes that match the DESI fiber radius.
-    * Ensure GFAs exist throughout the spectroscopic footprint.
-* Refactor SV/main targeting for spatial queries [`PR #458`_]. Includes:
-    * Many new spatial query capabilities in :mod:`desitarget.geomask`.
-    * Parallelize target selection by splitting across HEALPixels.
-    * Wrappers to read in HEALPix-split target files split by:
-        * HEALPixels, RA/Dec boxes, RA/Dec/radius caps, column names.
-    * Only process subsets of targets in regions of space, again including:
-        * HEALPixels, RA/Dec boxes, RA/Dec/radius caps.
-    * New unit tests to check these spatial queries.
-    * Updated notebook including tutorials on spatial queries.
-* Update the SV selections for BGS [`PR #457`_].
 * Update MTL to work for SV0-like cmx and SV1 tables [`PR #456`_]. Includes:
     * Make SUBPRIORITY a random number (0->1) in skies output.
     * New :func:`targets.main_cmx_or_sv` to parse flavor of survey.
@@ -50,10 +21,6 @@ desitarget Change Log
 .. _`PR #449`: https://github.com/desihub/desitarget/pull/449
 .. _`PR #452`: https://github.com/desihub/desitarget/pull/452
 .. _`PR #456`: https://github.com/desihub/desitarget/pull/456
-.. _`PR #457`: https://github.com/desihub/desitarget/pull/457
-.. _`PR #458`: https://github.com/desihub/desitarget/pull/458
-.. _`PR #459`: https://github.com/desihub/desitarget/pull/459
-.. _`PR #460`: https://github.com/desihub/desitarget/pull/460
 
 0.27.0 (2018-12-14)
 -------------------
