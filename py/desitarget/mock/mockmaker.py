@@ -3840,8 +3840,8 @@ class ELGMaker(SelectTargets):
                 if len(these) > 0:
                     if self.template_maker.add_SNeIa or self.template_maker.add_SNeIIp:
                         try:
-                            sne_fluxratiorange=data['sne_fluxratiorange']
-                            sne_filter=data['sne_filter']
+                            sne_fluxratiorange=data['SNE_FLUXRATIORANGE']
+                            sne_filter=data['SNE_FILTER']
                         except:
                             sne_fluxratiorange=(0.01, 1.0)
                             sne_filter='decam2014-r'
