@@ -3609,21 +3609,25 @@ class LRGMaker(SelectTargets):
             flux = np.zeros([nobj, len(self.wave)], dtype='f4')
 
             for these, issouth in zip( (north, south), (False, True) ):
-                    if len(these) > 0:
-                        if self.template_maker.add_SNeIa or self.template_maker.add_SNeIIp:
-                            try:
-                                sne_fluxratiorange=data['sne_fluxratiorange']
-                                sne_filter=data['sne_filter']
-                            except:
-                                sne_fluxratiorange=(0.01, 1.0)
-                                sne_filter='decam2014-r'
-                            flux1, _, meta1, objmeta1, snemeta = self.template_maker.make_templates(
-                                input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,sne_fluxratiorange=sne_fluxratiorange, sne_filter=sne_filter,
-                                nocolorcuts=True)
-                        else:
-                            flux1, _, meta1, objmeta1 = self.template_maker.make_templates(
-                                input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,
-                                nocolorcuts=True)
+                if len(these) > 0:
+                    if self.template_maker.add_SNeIa or self.template_maker.add_SNeIIp:
+                        try:
+                            sne_fluxratiorange=data['SNE_FLUXRATIORANGE']
+                            sne_filter=data['SNE_FILTER']
+                        except:
+                            sne_fluxratiorange=(0.01, 1.0)
+                            sne_filter='decam2014-r'
+
+                        log.debug('SN/host flux ratio range: {}-{}'.format(
+                            sne_fluxratiorange[0], sne_fluxratiorange[1]))
+
+                        flux1, _, meta1, objmeta1, snemeta = self.template_maker.make_templates(
+                            input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,sne_fluxratiorange=sne_fluxratiorange, sne_filter=sne_filter,
+                            nocolorcuts=True)
+                    else:
+                        flux1, _, meta1, objmeta1 = self.template_maker.make_templates(
+                            input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,
+                            nocolorcuts=True)
 
                     meta[these] = meta1
                     objmeta[these] = objmeta1
@@ -3845,6 +3849,10 @@ class ELGMaker(SelectTargets):
                         except:
                             sne_fluxratiorange=(0.01, 1.0)
                             sne_filter='decam2014-r'
+
+                        log.debug('SN/host flux ratio range: {}-{}'.format(
+                            sne_fluxratiorange[0], sne_fluxratiorange[1]))
+
                         flux1, _, meta1, objmeta1, snemeta = self.template_maker.make_templates(
                             input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,sne_fluxratiorange=sne_fluxratiorange, sne_filter=sne_filter,
                             nocolorcuts=True)
@@ -4071,11 +4079,15 @@ class BGSMaker(SelectTargets):
                 if len(these) > 0:
                     if self.template_maker.add_SNeIa or self.template_maker.add_SNeIIp:
                         try:
-                            sne_fluxratiorange=data['sne_fluxratiorange']
-                            sne_filter=data['sne_filter']
+                            sne_fluxratiorange=data['SNE_FLUXRATIORANGE']
+                            sne_filter=data['SNE_FILTER']
                         except:
                             sne_fluxratiorange=(0.01, 1.0)
                             sne_filter='decam2014-r'
+
+                        log.debug('SN/host flux ratio range: {}-{}'.format(
+                            sne_fluxratiorange[0], sne_fluxratiorange[1]))
+
                         flux1, _, meta1, objmeta1, snemeta = self.template_maker.make_templates(
                             input_meta=input_meta[these], vdisp=vdisp[these], south=issouth,sne_fluxratiorange=sne_fluxratiorange, sne_filter=sne_filter,
                             nocolorcuts=True)
